@@ -5,7 +5,7 @@ import pytest
 
 from invoice_agent.agents.approval.policy import APPROVAL_POLICY, CHECKLIST_KEYS, checklist_complete
 from invoice_agent.agents.approval.tools import ANALYST_TOOLS, VP_TOOLS, make_tools
-from invoice_agent.infra.db import connect, init_db, save_run
+from invoice_agent.database.db import connect, init_db, save_run
 from invoice_agent.models import Invoice, Recommendation
 
 FULL = {k: "ok" for k in CHECKLIST_KEYS}

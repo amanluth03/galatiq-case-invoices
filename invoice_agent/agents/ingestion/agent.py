@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from invoice_agent.utils.arithmetic import reconcile
 from invoice_agent.agents.ingestion.prompt import INGESTION_PROMPT
-from invoice_agent.infra.config import MAX_EXTRACTION_RETRIES
+from invoice_agent.database.config import MAX_EXTRACTION_RETRIES
 from invoice_agent.utils.normalize import to_invoice
 from invoice_agent.models import ExtractedInvoice, Invoice, Uncertainty
 

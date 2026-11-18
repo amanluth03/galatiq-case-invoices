@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.models import FinalOutcome, Flag, Invoice, LineItem
 from invoice_agent.runner import process_file
 from invoice_agent.web.app import create_app

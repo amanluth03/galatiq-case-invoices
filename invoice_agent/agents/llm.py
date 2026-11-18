@@ -1,7 +1,7 @@
 """Builds the xAI Grok chat model that every agent (ingestion agent, analyst, VP) runs on."""
 from langchain_xai import ChatXAI
 
-from invoice_agent.infra.config import Settings
+from invoice_agent.database.config import Settings
 
 
 class MissingApiKey(RuntimeError):

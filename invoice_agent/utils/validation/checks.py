@@ -7,8 +7,8 @@ import sqlite3
 from decimal import Decimal, InvalidOperation
 
 from invoice_agent.utils.arithmetic import line_overcharges, lines_plus_charges, reconcile
-from invoice_agent.infra.config import SCRUTINY_THRESHOLD
-from invoice_agent.infra.db import get_inventory
+from invoice_agent.database.config import SCRUTINY_THRESHOLD
+from invoice_agent.database.db import get_inventory
 from invoice_agent.models import Flag, Invoice
 from invoice_agent.utils.formatting import money, nice_date, quantity
 

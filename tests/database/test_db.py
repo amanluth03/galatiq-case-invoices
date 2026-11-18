@@ -3,8 +3,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
-from invoice_agent.infra import db
-from invoice_agent.infra.config import Settings
+from invoice_agent.database import db
+from invoice_agent.database.config import Settings
 from invoice_agent.models import FinalOutcome, Invoice
 
 

@@ -20,7 +20,7 @@ from invoice_agent import models
 from invoice_agent.agents.approval.loop import AnalystFn, ApprovalContext, VPFn, build_approval_graph
 from invoice_agent.agents.approval.policy import APPROVAL_POLICY
 from invoice_agent.agents.ingestion.agent import IngestionAgent, run_extraction
-from invoice_agent.infra.db import all_skus
+from invoice_agent.database.db import all_skus
 from invoice_agent.models import FinalOutcome, HumanDecision, JustifiedHumanDecision, PipelineState
 from invoice_agent.utils.guardrail import apply_guardrail, needs_person
 from invoice_agent.utils.reader import read_file

@@ -8,8 +8,8 @@ import pytest
 
 from invoice_agent.agents.ingestion.agent import make_ingestion_agent, run_extraction
 from invoice_agent.agents.llm import make_model
-from invoice_agent.infra.config import load_settings
-from invoice_agent.infra.db import SEED_INVENTORY
+from invoice_agent.database.config import load_settings
+from invoice_agent.database.db import SEED_INVENTORY
 from invoice_agent.utils.reader import read_file
 
 ROOT = Path(__file__).parent.parent.parent

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from invoice_agent.infra import db
-from invoice_agent.infra.db import connect, init_db, save_run
+from invoice_agent.database import db
+from invoice_agent.database.db import connect, init_db, save_run
 from invoice_agent.models import Invoice, LineItem
 from invoice_agent.utils.validation.checks import check_amounts_in_source, check_dates
 from invoice_agent.utils.validation.validate import claim_identity, find_duplicate, fingerprint, run_validation

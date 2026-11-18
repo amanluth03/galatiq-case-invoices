@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from langchain_core.tools import BaseTool, tool
 
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.agents.approval.policy import APPROVAL_POLICY
 from invoice_agent.utils.normalize import normalize_invoice_number
 

@@ -5,7 +5,7 @@ from invoice_agent.agents.analyst.agent import make_analyst
 from invoice_agent.agents.analyst.prompt import ANALYST_PROMPT
 from invoice_agent.agents.approval.loop import ApprovalContext
 from invoice_agent.agents.approval.tools import ANALYST_TOOLS, make_tools
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.models import Invoice, Recommendation
 from tests.fakes import ToolCallingFakeModel, structured_reply
 

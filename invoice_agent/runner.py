@@ -25,9 +25,9 @@ from invoice_agent.agents.ingestion.agent import make_ingestion_agent
 from invoice_agent.agents.llm import make_model
 from invoice_agent.agents.vp.agent import make_vp
 from invoice_agent.graph import Deps, build_graph, make_serializer
-from invoice_agent.infra import db
-from invoice_agent.infra.config import Settings
-from invoice_agent.infra.logging_setup import RUN_LOGGER
+from invoice_agent.database import db
+from invoice_agent.database.config import Settings
+from invoice_agent.database.logging_setup import RUN_LOGGER
 from invoice_agent.models import (
     ApprovalOutcome, FinalOutcome, Flag, HumanDecision, Invoice, PipelineState, Uncertainty,
 )

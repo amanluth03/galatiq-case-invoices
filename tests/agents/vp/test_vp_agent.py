@@ -5,7 +5,7 @@ from invoice_agent.agents.approval.loop import ApprovalContext
 from invoice_agent.agents.approval.tools import VP_TOOLS, make_tools
 from invoice_agent.agents.vp.agent import make_vp
 from invoice_agent.agents.vp.prompt import VP_PROMPT
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.models import Invoice, Round, VPReview
 from tests.fakes import ToolCallingFakeModel, make_recommendation, structured_reply
 

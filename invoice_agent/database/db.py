@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from invoice_agent.infra.config import Settings
+from invoice_agent.database.config import Settings
 from invoice_agent.models import PipelineState
 
 # Fixed seed stock and reference prices (FakeItem has zero stock on purpose: sample invoice 1003).

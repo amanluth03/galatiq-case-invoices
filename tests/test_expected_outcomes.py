@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from invoice_agent.infra.config import Settings, load_settings
+from invoice_agent.database.config import Settings, load_settings
 from invoice_agent.runner import build_runtime, process_dir
 
 ROOT = Path(__file__).parent.parent

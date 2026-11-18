@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps, build_graph, make_serializer
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.models import (
     ApprovalOutcome, FinalOutcome, Flag, Invoice, LineItem, Round, Uncertainty,
 )

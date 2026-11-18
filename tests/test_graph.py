@@ -10,7 +10,7 @@ from langgraph.types import Command
 
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps, build_graph, make_serializer
-from invoice_agent.infra import db
+from invoice_agent.database import db
 from invoice_agent.models import ExtractedField, ExtractedLineItem
 from invoice_agent.utils.normalize import to_invoice
 from invoice_agent.utils.validation.validate import fingerprint

@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from invoice_agent.infra.logging_setup import RUN_LOGGER, setup_logging
+from invoice_agent.database.logging_setup import RUN_LOGGER, setup_logging
 
 
 @pytest.fixture(autouse=True)

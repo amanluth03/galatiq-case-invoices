@@ -4,8 +4,8 @@ the "run all sample invoices" button and startup recovery. Fake deps/graph stand
 import pytest
 from fastapi.testclient import TestClient
 
-from invoice_agent.infra import db
-from invoice_agent.infra.config import Settings
+from invoice_agent.database import db
+from invoice_agent.database.config import Settings
 from invoice_agent.models import FinalOutcome, Invoice
 from invoice_agent.runner import process_file
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES

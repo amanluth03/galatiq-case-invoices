@@ -16,8 +16,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps, build_graph, make_serializer
-from invoice_agent.infra import db
-from invoice_agent.infra.logging_setup import setup_logging
+from invoice_agent.database import db
+from invoice_agent.database.logging_setup import setup_logging
 from invoice_agent.models import ExtractedLineItem
 from invoice_agent.runner import process_dir, process_file, resume_review
 from tests.fakes import (

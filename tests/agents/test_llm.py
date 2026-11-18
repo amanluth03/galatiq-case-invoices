@@ -3,7 +3,7 @@ import pytest
 from langchain_xai import ChatXAI
 
 from invoice_agent.agents.llm import MissingApiKey, make_model
-from invoice_agent.infra.config import Settings
+from invoice_agent.database.config import Settings
 
 
 def test_missing_key_raises_clear_error():
