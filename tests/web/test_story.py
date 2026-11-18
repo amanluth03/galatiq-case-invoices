@@ -17,7 +17,9 @@ from invoice_agent.models import (
 from invoice_agent.runner import process_file
 from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON
 from invoice_agent.web.app import progress_recorder, row_state
-from invoice_agent.web.story import build_story, field_words, lookup_text, plain_message
+from invoice_agent.web.story import (
+    SKIPPED_AGENTS, SLOW_STEP_HINT, build_story, field_words, lookup_text, plain_message,
+)
 from tests.fakes import ScriptedAnalyst, ScriptedIngestionAgent, ScriptedVP, make_extracted, make_recommendation, make_review
 from tests.test_graph import extracted_1002
 from tests.test_runner import INVOICES, RecordingPay, build
@@ -69,14 +71,17 @@ def test_paid_story(conn):
 
 
 def test_rule_rejected_story(conn):
-    """Agents approve an over-stock invoice; the guardrail's hard rule rejects it and step 7 says why."""
+    """An over-stock invoice is rejected by a hard rule straight after the checks: steps 4 and 5 are skipped
+    (the agents weren't needed), step 6 names the rule and step 7 says why it was rejected."""
     deps, graph, _ = build(conn, [extracted_1002()], checklist=FULL_CHECKLIST)
     state = process_file(INVOICES / "invoice_1002.txt", deps, graph)
     steps = finished_story(conn, state["run_id"])
     assert steps[2].state == "warn" and "All items are in stock" not in texts(steps[2])
-    assert "GadgetX: 20 requested across 1 line(s), 5 in stock" in texts(steps[2])
+    assert "Ordered 20 GadgetX, only 5 in stock" in texts(steps[2])
+    assert steps[3].state == steps[4].state == "skipped"
+    assert texts(steps[3]) == SKIPPED_AGENTS == texts(steps[4])
     assert steps[5].lines[0].kind == "block"
-    assert "A hard rule is broken (1 item is ordered beyond stock on hand)" in texts(steps[5])
+    assert texts(steps[5]) == "A hard rule is broken (1 item is ordered beyond stock on hand), so it's rejected without the agents."
     assert steps[6].state == "failed" and "Rejected: 1 item is ordered beyond stock on hand." in texts(steps[6])
     assert "the guardrail" in texts(steps[6])
 
@@ -115,7 +120,7 @@ def test_money_difference_waits_for_a_person_with_plain_reason():
                   currency="EUR", items=[LineItem(name_raw="WidgetA", sku="WidgetA", qty=Decimal(1),
                                                   unit_price=Decimal("300.00"))])
     flags = [Flag(severity="needs_scrutiny", code="price_mismatch", field_path="items[0].unit_price",
-                  message="WidgetA: invoiced at 300.00, reference price is 250.00")]
+                  message="WidgetA charged $300.00, Acme's price is $250.00")]
     rounds = [Round(number=1, recommendation=make_recommendation("REJECT"), review=make_review(final_decision="REJECT"))]
     state = {
         "raw_text": "a\nb", "format": "txt", "invoice": inv, "fingerprint": "fp", "flags": flags,
@@ -208,3 +213,48 @@ def test_plain_words_for_paths_and_lookups():
         "Line 1: line total 10 is more than quantity × unit price = 5"
     assert lookup_text("get_inventory", {"item": "WidgetA"}) == "Looked up WidgetA stock and price"
     assert lookup_text("Recommendation", {}) is None
+
+
+def _blocked_state(final: FinalOutcome, **extra) -> dict:
+    """A validated invoice with one broken hard rule (unknown item) that reached the agents, ending in `final`."""
+    inv = Invoice(invoice_number="INV-9", vendor="Widgets Inc.", total=Decimal("100.00"),
+                  items=[LineItem(name_raw="Gizmo", qty=Decimal(1), unit_price=Decimal("100.00"))])
+    rounds = [Round(number=1, recommendation=make_recommendation("APPROVE"), review=make_review())]
+    return {"raw_text": "x", "format": "txt", "invoice": inv, "fingerprint": "fp",
+            "flags": [Flag(severity="must_reject", code="unknown_item", message="Gizmo isn't in inventory")],
+            "approval": ApprovalOutcome(decision="NEEDS_HUMAN_REVIEW", rounds=rounds, reasoning="held"),
+            "final": final, **extra}
+
+
+def test_guardrail_step_matches_what_happened_to_a_rule_breaking_invoice():
+    """Step 6 only says "rejected" when it was: a person's override (with their justification) and a run still
+    waiting for a person each get their own sentence."""
+    from invoice_agent.models import HumanDecision
+    waiting = build_story(_blocked_state(FinalOutcome(status="NEEDS_HUMAN_REVIEW", decided_by="agents",
+                                                      reasoning="held")), "human_review", False)
+    assert texts(waiting[5]) == ("A hard rule is broken (1 item isn't in inventory), "
+                                 "so it's waiting for a person to decide.")
+    overridden = build_story(_blocked_state(
+        FinalOutcome(status="PAID", decided_by="human", reasoning="ok"),
+        human_decision=HumanDecision(decision="APPROVE", justification="New SKU agreed by phone.")), "pay", False)
+    assert texts(overridden[5]) == ("A hard rule is broken (1 item isn't in inventory), but a person overrode it "
+                                    "with this justification: New SKU agreed by phone.")
+    assert "rejected" not in texts(overridden[5]) and "rejected" not in texts(waiting[5])
+
+
+def test_pdf_step_one_counts_pages():
+    """A PDF with a page count reads "PDF, 2 pages"; one saved before page counts existed still shows its lines."""
+    assert texts(build_story({"raw_text": "a\nb\nc", "format": "pdf", "page_count": 2}, "read", True)[0]) == \
+        "PDF, 2 pages"
+    assert texts(build_story({"raw_text": "a\nb\nc", "format": "pdf"}, "read", True)[0]) == "PDF, 3 lines"
+
+
+def test_slow_running_step_says_grok_is_retrying():
+    """A step running for more than 30 seconds gets the calm "taking longer than usual" line; a fresh one doesn't."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+    state = {"raw_text": "a", "format": "txt"}
+    slow = build_story({**state, "step_started_at": (now - timedelta(seconds=45)).isoformat()}, "read", True, now=now)
+    fresh = build_story({**state, "step_started_at": (now - timedelta(seconds=5)).isoformat()}, "read", True, now=now)
+    assert slow[1].state == "running" and SLOW_STEP_HINT in texts(slow[1])
+    assert SLOW_STEP_HINT not in texts(fresh[1])

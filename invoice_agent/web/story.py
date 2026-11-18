@@ -5,11 +5,11 @@ page, so the two always tell the same story. It is pure: it only reads the state
 """
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from pathlib import Path
 
 from invoice_agent.models import ApprovalOutcome, Flag, Round
+from invoice_agent.utils.formatting import money, nice_date, quantity  # noqa: F401 (re-exported for app.py)
 from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON
 
 # Stages a run reports before any graph node has finished: nothing in its stored state belongs to this run yet.
@@ -52,6 +52,10 @@ _BLOCKING_PHRASES: dict[str, tuple[str, str] | str] = {
     "invoice_number_reused": "this invoice number was already billed with different contents",
 }
 SEVERITY_KIND = {"must_reject": "block", "needs_scrutiny": "warn", "info": "info"}
+SKIPPED_AGENTS = "Skipped: a hard rule already decides this invoice, so the agents weren't needed."
+# A running step older than this gets a calm "Grok is slow" line (the client retries on its own).
+SLOW_STEP_SECONDS = 30
+SLOW_STEP_HINT = "Grok is taking longer than usual. It retries automatically; this can take up to a few minutes."
 
 
 @dataclass
@@ -72,31 +76,21 @@ class Step:
 
 # ---------- formatting ----------
 
-def money(value, currency: str = "USD") -> str:
-    """Format an amount as $1,234.56 (or "1,234.56 EUR" for other currencies); "n/a" when unknown."""
-    if value is None or value == "":
-        return "n/a"
-    try:
-        d = Decimal(str(value))
-    except InvalidOperation:
-        return str(value)
-    sign = "−" if d < 0 else ""
-    body = f"{abs(d):,.2f}"
-    return f"{sign}${body}" if currency.upper() == "USD" else f"{sign}{body} {currency.upper()}"
-
-
-def nice_date(value) -> str:
-    """Format a date as 15 Jan 2026; "n/a" when unknown."""
-    # value.day instead of %-d: the no-padding flag is not portable (it fails on Windows).
-    return f"{value.day} {value.strftime('%b %Y')}" if isinstance(value, date) else "n/a"
-
-
 def nice_time(iso: str | None) -> str:
     """Format a stored ISO timestamp as "17 Nov 2026, 14:32 UTC" (times are stored in UTC)."""
     if not iso:
         return ""
     t = datetime.fromisoformat(iso)
     return f"{t.day} {t.strftime('%b %Y, %H:%M')} UTC"
+
+
+def _justification(state: dict) -> str | None:
+    """The reviewer's written justification for approving over a hard rule, if the run has one."""
+    human = state.get("human_decision")
+    if human is None:
+        return None
+    text = human.get("justification") if isinstance(human, dict) else getattr(human, "justification", None)
+    return (text or "").strip() or None
 
 
 def display_name(run_id: str, source_path: str | None) -> str:
@@ -155,8 +149,8 @@ def _money_differences(flags: list[Flag], currency: str) -> str:
     parts = []
     for f in flags:
         if f.code == "price_mismatch":
-            # The message starts with the SKU ("WidgetA: invoiced at 300.00, ...").
-            parts.append(f"{f.message.split(':', 1)[0]}'s price differs from Acme's records")
+            # The message starts with the SKU ("WidgetA charged $300.00, ...").
+            parts.append(f"{f.message.split(' charged ', 1)[0]}'s price differs from Acme's records")
         elif f.code == "arithmetic_mismatch":
             parts.append("the numbers don't add up")
         elif f.code == "amount_not_in_source":
@@ -195,10 +189,11 @@ def _lookups(state: dict) -> list[Line]:
 # ---------- the builder ----------
 
 def build_story(state: dict, stage: str | None, live: bool, original_name: str | None = None,
-                decided_at: str | None = None) -> list[Step]:
+                decided_at: str | None = None, now: datetime | None = None) -> list[Step]:
     """The 7 steps of an invoice's story from its (hydrated) state.
     stage: the last top-level graph node that finished; live: the run is still PROCESSING (unfinished steps show as
-    running or pending); original_name: the file this one duplicates; decided_at: when the run was last saved (ISO)."""
+    running or pending); original_name: the file this one duplicates; decided_at: when the run was last saved (ISO);
+    now: the current time (UTC), to say when a running step is taking unusually long."""
     if live and stage in NOT_STARTED:
         # A re-run's row still holds the previous result until the first node finishes: show none of it.
         state = {}
@@ -211,6 +206,9 @@ def build_story(state: dict, stage: str | None, live: bool, original_name: str |
     validated = "fingerprint" in state and state.get("fingerprint") is not None
     duplicate = bool(state.get("duplicate_of"))
     errored = final is not None and final.status == "ERROR"
+    blocked = blocking_summary(flags) if validated and not duplicate else None
+    # A hard rule decided it in validate, so the analyst and VP never ran (older runs may still have rounds).
+    shortcut = blocked is not None and approval is None and not rounds
 
     steps: list[Step] = []
 
@@ -219,7 +217,9 @@ def build_story(state: dict, stage: str | None, live: bool, original_name: str |
     if raw is not None:
         n = len(raw.splitlines())
         fmt = state.get("format") or ""
-        what = f"{n} lines of text" if fmt == "pdf" else f"{n} lines"
+        pages = state.get("page_count")
+        # A PDF is measured in pages; runs saved before page counts existed fall back to lines.
+        what = f"{pages} page{'s' if pages != 1 else ''}" if fmt == "pdf" and pages else f"{n} lines"
         s1.state, s1.lines = "done", [Line("text", f"{FORMAT_LABELS.get(fmt, 'File')}, {what}")]
     steps.append(s1)
 
@@ -261,7 +261,10 @@ def build_story(state: dict, stage: str | None, live: bool, original_name: str |
     # 4. Analyst agent (round 1). 5. VP agent (round 1, then any further rounds, indented).
     s4 = Step(4, "Analyst agent", "pending")
     s5 = Step(5, "VP agent reviews", "pending")
-    if rounds:
+    if shortcut:
+        for s in (s4, s5):
+            s.state, s.lines = "skipped", [Line("meta", SKIPPED_AGENTS)]
+    elif rounds:
         first = rounds[0].recommendation
         s4.state = "done"
         s4.lines = [Line("agent", _recommends(first.decision)), Line("text", short(first.reasoning))]
@@ -281,11 +284,24 @@ def build_story(state: dict, stage: str | None, live: bool, original_name: str |
 
     # 6. Guardrail: the code rules that sit above the agents.
     s6 = Step(6, "Guardrail", "pending")
-    if approval is not None or (final is not None and final.decided_by == "guardrail"):
-        blocked = blocking_summary(flags)
+    waiting = (final is not None and final.status == "NEEDS_HUMAN_REVIEW") or \
+        (final is None and approval is not None and approval.decision == "NEEDS_HUMAN_REVIEW")
+    if approval is not None or shortcut or (final is not None and final.decided_by == "guardrail"):
         if blocked:
             s6.state = "warn"
-            s6.lines = [Line("block", f"A hard rule is broken ({blocked}), so it's rejected regardless of the agents.")]
+            # Say what actually happened: only a rejection is "rejected"; a person may still decide (or have decided).
+            if final is not None and final.decided_by == "human" and final.status == "PAID":
+                why = _justification(state)
+                s6.lines = [Line("warn", f"A hard rule is broken ({blocked}), but a person overrode it" +
+                                 (f" with this justification: {why}" if why else " with a written justification."))]
+            elif final is not None and final.decided_by == "human":
+                s6.lines = [Line("block", f"A hard rule is broken ({blocked}). A person reviewed it and rejected it.")]
+            elif waiting:
+                s6.lines = [Line("block", f"A hard rule is broken ({blocked}), so it's waiting for a person to decide.")]
+            elif shortcut:
+                s6.lines = [Line("block", f"A hard rule is broken ({blocked}), so it's rejected without the agents.")]
+            else:
+                s6.lines = [Line("block", f"A hard rule is broken ({blocked}), so it's rejected regardless of the agents.")]
         elif approval is not None and approval.decision == "NEEDS_HUMAN_REVIEW":
             s6.state = "warn"
             if approval.reasoning.startswith(HUMAN_REVIEW_REASON.split("{")[0]):
@@ -307,7 +323,7 @@ def build_story(state: dict, stage: str | None, live: bool, original_name: str |
         s7.title = f"Decision: {STATUS_LABELS[final.status]}"
     steps.append(s7)
 
-    _set_progress(steps, live, stage, errored, duplicate, final, state)
+    _set_progress(steps, live, stage, errored, duplicate, final, state, now)
     return steps
 
 
@@ -345,8 +361,16 @@ def _decision(final, state: dict, flags: list[Flag], approval, currency: str,
     return "failed", [Line("block", "Stopped: this invoice couldn't be processed, so nothing was paid."), who]
 
 
+def _slow(state: dict, now: datetime | None) -> bool:
+    """True when the running step started (per the saved progress) more than SLOW_STEP_SECONDS ago."""
+    started = state.get("step_started_at")
+    if not started or now is None:
+        return False
+    return (now - datetime.fromisoformat(started)).total_seconds() > SLOW_STEP_SECONDS
+
+
 def _set_progress(steps: list[Step], live: bool, stage: str | None, errored: bool, duplicate: bool,
-                  final, state: dict) -> None:
+                  final, state: dict, now: datetime | None = None) -> None:
     """Mark the steps not yet reached: the next one running (live), failed (error) or skipped (finished early)."""
     if duplicate:
         # A duplicate's story ends at step 3: the agents and the guardrail never see it.
@@ -363,6 +387,8 @@ def _set_progress(steps: list[Step], live: bool, stage: str | None, errored: boo
                          7: "Deciding..."}[nxt.number]
             if nxt.number == 4:
                 nxt.lines = _lookups(state)
+            if _slow(state, now):
+                nxt.lines.append(Line("meta", SLOW_STEP_HINT))
         return
     if errored:
         reason = Line("block", plain_message(" ".join(final.reasoning.split())))

@@ -133,7 +133,7 @@ main.wrap { padding-top: 24px; padding-bottom: 64px; }
 
 .pill-queued { color: var(--muted); background: var(--surface-2); border-color: var(--line-strong); }
 
-/* ---------- page layout: intro, main column (drop zone + story), Invoices list ---------- */
+/* ---------- page layout: home (intro, drop card, dashboard); invoice page (story + details, Invoices list) ---------- */
 .intro { margin-bottom: 20px; max-width: 70ch; }
 .intro h1 { margin-bottom: 6px; }
 .lede { color: var(--ink-2); }
@@ -143,16 +143,21 @@ main.wrap { padding-top: 24px; padding-bottom: 64px; }
   .runs { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
 }
 .main-col { min-width: 0; display: grid; gap: 16px; align-content: start; }
+.crumbs { margin-bottom: 16px; font-weight: 600; }
+.crumbs a { text-decoration: none; }
+.crumbs a:hover { text-decoration: underline; }
 
 .empty {
   text-align: center; padding: 56px 24px; background: var(--surface); border: 1px dashed var(--line-strong);
   border-radius: var(--radius);
 }
+.board .empty { padding: 32px 20px; }
 .empty h1, .empty h2 { margin-bottom: 8px; }
 .empty p + p { margin-top: 8px; }
 
 /* ---------- intake: one card with the big drop zone and the quieter samples action under it ---------- */
 .intake {
+  margin-bottom: 24px;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: var(--shadow); padding: 12px; display: grid; gap: 10px; min-width: 0;
 }
@@ -182,8 +187,8 @@ main.wrap { padding-top: 24px; padding-bottom: 64px; }
   box-shadow: var(--shadow); padding: 20px; min-width: 0;
 }
 .story-head { display: flex; justify-content: space-between; align-items: center; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 16px; }
-.story-file { font-family: var(--mono); font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
-.steps { list-style: none; margin: 0; padding: 0; }
+.story-file { font-family: var(--mono); font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.steps { margin: 0; padding: 0; }
 .st { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 0 12px; position: relative; padding-bottom: 18px; }
 .st:last-child { padding-bottom: 0; }
 /* The thin line joining one step's mark to the next. */
@@ -213,7 +218,7 @@ main.wrap { padding-top: 24px; padding-bottom: 64px; }
 @keyframes pulse { 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .st-running .st-mark::after { animation: none; } }
 
-.st-lines { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.st-lines { margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
 .ln { color: var(--ink-2); overflow-wrap: anywhere; padding-left: 22px; position: relative; }
 .ln::before { position: absolute; left: 0; top: 0; width: 16px; text-align: center; font-weight: 700; }
 .ln-text, .ln-agent, .ln-round, .ln-meta { padding-left: 0; }
@@ -231,11 +236,19 @@ main.wrap { padding-top: 24px; padding-bottom: 64px; }
 .ln-round ~ .ln:not(.ln-round) { margin-left: 14px; }
 .ln-meta { font-size: .85rem; color: var(--muted); margin-top: 2px; }
 
-/* original document toggle (step 2) */
-.doc-toggle { margin-top: 8px; }
-.doc-toggle summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: .9rem; width: fit-content; }
-.doc-toggle[open] summary { margin-bottom: 8px; }
-.doc-toggle .legend { margin-bottom: 8px; }
+/* ---------- invoice details: document beside the extracted fields (stacked on a phone), then flags and more ---------- */
+.details { display: grid; gap: 16px; min-width: 0; }
+.details-title { font-size: 1.2rem; margin-top: 8px; }
+.details h3 { font-size: 1rem; font-weight: 650; margin-bottom: 10px; }
+.details h4 { font-size: .9rem; font-weight: 600; margin: 0; }
+.cols { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1100px) {
+  .cols { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: start; }
+}
+.facts { display: grid; gap: 16px; min-width: 0; align-content: start; }
+.doc-pane .legend { margin-bottom: 10px; }
+.doc-pane .hint { margin-bottom: 10px; }
+.legend { margin-bottom: 8px; }
 /* The original document: monospace, scrolls inside its own pane (never the page). */
 .doc {
   margin: 0; padding: 16px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
@@ -247,7 +260,89 @@ mark { color: inherit; border-radius: 3px; padding: 0 2px; }
 mark.conf-medium { background: var(--conf-medium); box-shadow: inset 0 -2px 0 var(--conf-medium-line); }
 mark.conf-low { background: var(--conf-low); box-shadow: inset 0 -2px 0 var(--conf-low-line); }
 mark.conf-high { background: transparent; box-shadow: inset 0 -1px 0 var(--line-strong); }
-.doc mark { cursor: help; }
+/* Uncertain spots are focusable; live.js shows their reason in the tooltip below on hover, focus or tap. */
+.doc mark[data-reason] { cursor: help; }
+.doc mark[data-reason]:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* The tooltip sits on <body> with fixed positioning, so the document pane's scrolling never clips it. */
+.tip {
+  position: fixed; z-index: 50; max-width: min(280px, calc(100vw - 24px)); padding: 8px 10px; border-radius: 6px;
+  background: var(--ink); color: var(--bg); font: 500 .82rem/1.45 var(--font); white-space: normal;
+  overflow-wrap: anywhere; box-shadow: 0 4px 14px rgba(0, 0, 0, .25); pointer-events: none;
+}
+.tip[hidden] { display: none; }
+
+/* flags */
+.flag-group + .flag-group { margin-top: 16px; }
+.flag-group h4 { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.sev-badge { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 2px 8px; border-radius: 4px; }
+.sev-badge.sev-must_reject { color: var(--sev-block); background: var(--sev-block-bg); }
+.sev-badge.sev-needs_scrutiny { color: var(--sev-look); background: var(--sev-look-bg); }
+.sev-badge.sev-info { color: var(--sev-info); background: var(--sev-info-bg); }
+.flags { display: grid; gap: 8px; }
+.flag { display: grid; gap: 2px; padding: 8px 12px; border-left: 3px solid var(--line-strong); background: var(--surface-2); border-radius: 0 6px 6px 0; }
+.sev-must_reject .flag { border-left-color: var(--sev-block); }
+.sev-needs_scrutiny .flag { border-left-color: var(--sev-look); }
+.sev-info .flag { border-left-color: var(--sev-info); }
+.flag-title { font-weight: 600; }
+.flag-msg { color: var(--ink-2); font-size: .88rem; overflow-wrap: anywhere; }
+.ok { color: var(--paid); font-weight: 600; }
+
+/* key-value fields + line items */
+.kv, .lines { width: 100%; border-collapse: collapse; }
+.kv th, .kv td, .lines th, .lines td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
+.kv tr:last-child th, .kv tr:last-child td, .lines tbody tr:last-child td { border-bottom: 0; }
+.kv th { font-weight: 500; color: var(--muted); width: 38%; }
+.kv td { overflow-wrap: anywhere; }
+.kv td.num { text-align: left; }
+.lines th { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.lines th.num, .lines td.num { text-align: right; }
+.table-scroll { overflow-x: auto; }
+.item-name { font-weight: 600; display: block; }
+.item-sub { display: block; font-size: .8rem; color: var(--muted); white-space: normal; }
+.line-must_reject td:first-child { box-shadow: inset 3px 0 0 var(--sev-block); }
+.line-needs_scrutiny td:first-child { box-shadow: inset 3px 0 0 var(--sev-look); }
+.line-info td:first-child { box-shadow: inset 3px 0 0 var(--sev-info); }
+.tint.conf-medium { background: color-mix(in srgb, var(--conf-medium) 45%, transparent); }
+.tint.conf-low { background: color-mix(in srgb, var(--conf-low) 45%, transparent); }
+.unc { margin-top: 4px; font-size: .82rem; color: var(--ink-2); font-variant-numeric: normal; white-space: normal; }
+.raw { quotes: "“" "”"; font-family: var(--mono); font-size: .85em; }
+.conf-badge { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; margin-right: 4px; }
+.conf-badge.conf-medium { background: var(--conf-medium); }
+.conf-badge.conf-low { background: var(--conf-low); }
+
+/* checklist + questions */
+.checklist { margin: 12px 0 0; display: grid; gap: 10px; }
+.check { display: grid; gap: 2px; padding-left: 26px; position: relative; }
+.check::before {
+  content: "✓"; position: absolute; left: 0; top: 0; width: 18px; height: 18px; border-radius: 50%;
+  font-size: .7rem; display: grid; place-items: center; color: var(--paid); background: var(--paid-bg); font-weight: 700;
+}
+.check-missing::before { content: "!"; color: var(--sev-block); background: var(--sev-block-bg); }
+.check dt { font-weight: 600; }
+.check dd { margin: 0; color: var(--ink-2); font-size: .9rem; overflow-wrap: anywhere; }
+.questions { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+.questions li { overflow-wrap: anywhere; }
+
+/* agents' exchange (collapsible) */
+.timeline summary { cursor: pointer; display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; list-style: none; }
+.timeline summary::-webkit-details-marker { display: none; }
+.timeline summary::before { content: "▸"; color: var(--muted); transition: transform .15s; display: inline-block; }
+.timeline[open] summary::before { transform: rotate(90deg); }
+/* A styled span, not a heading: headings inside <summary> lose their role in some screen readers. */
+.summary-title { font-size: 1rem; font-weight: 650; letter-spacing: -0.01em; }
+.rounds { margin: 16px 0 0; display: grid; gap: 20px; }
+.round { border-left: 2px solid var(--line-strong); padding-left: 16px; }
+.round h4 { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: .75rem; margin-bottom: 8px; }
+.turn { margin-bottom: 12px; }
+.turn-vp { padding-left: 14px; border-left: 2px dotted var(--line-strong); }
+.who { font-weight: 650; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.said { color: var(--ink-2); white-space: pre-line; max-width: 80ch; overflow-wrap: anywhere; }
+.feedback { margin-top: 6px; }
+.evidence { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: .9rem; }
+.tag { font-size: .75rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2); }
+.tag-approve { color: var(--paid); background: var(--paid-bg); border-color: transparent; }
+.tag-reject { color: var(--rejected); background: var(--rejected-bg); border-color: transparent; }
+.tag-back { color: var(--review); background: var(--review-bg); border-color: transparent; }
 
 /* ---------- decision panel (inside step 7 when an invoice waits for you) ---------- */
 .decide { margin-top: 12px; padding: 16px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-2); }
@@ -291,10 +386,76 @@ textarea:focus-visible { outline-offset: 0; }
 /* ---------- Invoices list ---------- */
 .runs { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; min-width: 0; }
 .runs h2 { margin-bottom: 10px; }
-.run-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.run-list { display: grid; gap: 2px; }
 /* Each row is one ordinary block link (no stretched overlays), so it can never capture clicks outside itself. */
 .run { display: grid; gap: 4px; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--ink); }
 .run:hover { background: var(--surface-2); }
 .run[aria-current="page"] { background: var(--duplicate-bg); box-shadow: inset 3px 0 0 var(--accent); }
 .run-name { font-family: var(--mono); font-size: .82rem; overflow-wrap: anywhere; }
 .run-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: .85rem; color: var(--ink-2); }
+
+/* ---------- home dashboard: summary tiles, then every invoice (a table; cards on a phone) ---------- */
+.board { display: grid; gap: 14px; min-width: 0; }
+.board > h2 { font-size: 1.2rem; }
+.tiles { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 720px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .tiles { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+.tile {
+  display: grid; gap: 2px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); border-top: 3px solid var(--line-strong); min-width: 0;
+}
+.tile-label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+.tile-count { font-size: 1.6rem; font-weight: 700; text-align: left; line-height: 1.2; }
+.tile-amount { font-size: .85rem; color: var(--ink-2); text-align: left; white-space: normal; }
+.tile-paid { border-top-color: var(--paid); }
+.tile-rejected { border-top-color: var(--rejected); }
+.tile-needs_human_review { border-top-color: var(--review); }
+.tile-duplicate { border-top-color: var(--duplicate); }
+.tile-error { border-top-color: var(--error); }
+.tile-processing { border-top-color: var(--accent); }
+/* Something is waiting for a person: the tile stands out. */
+.tile-hot { background: var(--review-bg); border-color: var(--review); border-top-width: 3px; }
+.tile-hot .tile-label, .tile-hot .tile-count { color: var(--review); }
+
+.board-table {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.board-table table { width: 100%; border-collapse: collapse; }
+.board-table th {
+  text-align: left; font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2);
+}
+.board-table th.num { text-align: right; }
+.board-table td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.board-table tbody tr:last-child td { border-bottom: 0; }
+/* live.js makes the whole row open the invoice; the file name is the real (keyboard) link. */
+.board-table tbody tr[data-href] { cursor: pointer; }
+.board-table tbody tr:hover { background: var(--surface-2); }
+.row-link { font-family: var(--mono); font-size: .85rem; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.row-needs_human_review td:first-child { box-shadow: inset 3px 0 0 var(--review); }
+.c-amount { font-weight: 600; }
+.c-vendor, .c-why { color: var(--ink-2); }
+.c-why { font-size: .9rem; overflow-wrap: anywhere; }
+.c-time { color: var(--muted); white-space: nowrap; font-size: .82rem; }
+
+@media (max-width: 760px) {
+  .board-table thead { display: none; }
+  .board-table table, .board-table tbody { display: block; }
+  .board-table tbody tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    grid-template-areas: "status amount" "file file" "vendor vendor" "why why" "time time";
+  }
+  .board-table tbody tr:last-child { border-bottom: 0; }
+  .board-table td { display: block; padding: 0; border: 0; }
+  .row-needs_human_review { box-shadow: inset 3px 0 0 var(--review); }
+  .row-needs_human_review td:first-child { box-shadow: none; }
+  .c-status { grid-area: status; }
+  .c-amount { grid-area: amount; font-size: 1.05rem; }
+  .c-file { grid-area: file; margin-top: 2px; }
+  .c-vendor { grid-area: vendor; }
+  .c-vendor:empty { display: none; }
+  .c-why { grid-area: why; }
+  .c-time { grid-area: time; }
+}

@@ -215,10 +215,16 @@ def test_init_db_adds_stage_column_to_old_database(tmp_path):
 
 
 def test_process_file_reports_stages(conn):
-    """on_stage hears each graph node as it finishes, in order, and a preassigned run id is used."""
+    """on_update hears each top-level graph node as it finishes, in order, and a preassigned run id is used."""
     deps, graph, _ = build(conn, [make_extracted()])
     seen: list[str] = []
-    state = process_file(INVOICES / "invoice_1001.txt", deps, graph, run_id="fixed-id", on_stage=seen.append)
+
+    def on_update(namespace, node, update):
+        """Keep only the top-level pipeline nodes (not the analyst/VP loop inside approval)."""
+        if not namespace:
+            seen.append(node)
+
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph, run_id="fixed-id", on_update=on_update)
     assert seen[:4] == ["read", "extract", "validate", "approval"]
     assert seen[-1] == "pay" and state["run_id"] == "fixed-id"
 

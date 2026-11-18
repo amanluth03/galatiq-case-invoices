@@ -1,0 +1,49 @@
+{#- The home dashboard (also re-fetched by live.js while invoices run): tiles with counts and dollar totals, then
+    every invoice. A row's file name is its link; live.js makes the whole row clickable too. -#}
+<section class="board" aria-labelledby="board-title" data-dashboard{% if board.running %} data-live{% endif %}>
+  <h2 id="board-title">Invoices</h2>
+  {% if board.rows %}
+  <div class="tiles" role="list" aria-label="Totals">
+    {% for t in board.tiles %}
+    <div class="tile tile-{{ t.key }}{% if t.highlight %} tile-hot{% endif %}" role="listitem">
+      <span class="tile-label">{{ t.label }}</span>
+      <span class="tile-count num">{{ t.count }}</span>
+      {% if t.amount %}<span class="tile-amount num">{{ t.amount }}</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% if board.non_usd %}<p class="hint">Dollar totals count US-dollar invoices only.</p>{% endif %}
+  <div class="board-table">
+    <table>
+      <caption class="sr-only">Every processed invoice, those waiting for you first</caption>
+      <thead>
+        <tr>
+          <th scope="col">File</th>
+          <th scope="col">Vendor</th>
+          <th scope="col" class="num">Amount</th>
+          <th scope="col">Status</th>
+          <th scope="col">Why</th>
+          <th scope="col">Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in board.rows %}
+        <tr class="row row-{{ r.status }}" data-href="/invoices/{{ r.run_id }}">
+          <td class="c-file"><a class="row-link" href="/invoices/{{ r.run_id }}">{{ r.name }}</a></td>
+          <td class="c-vendor">{{ r.vendor }}</td>
+          <td class="c-amount num">{{ r.amount }}</td>
+          <td class="c-status"><span class="pill pill-{{ r.status }}">{{ r.label }}</span></td>
+          <td class="c-why">{{ r.why }}</td>
+          <td class="c-time"><span class="sr-only">Updated </span>{{ r.time }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <p><strong>No invoices yet.</strong> Drop a file above and press Process this invoice: its page opens and tells its story step by step.</p>
+    <p class="hint">Try data/invoices/invoice_1010.txt to see a person step in.</p>
+  </div>
+  {% endif %}
+</section>

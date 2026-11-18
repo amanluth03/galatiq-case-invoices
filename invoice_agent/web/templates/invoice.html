@@ -1,0 +1,40 @@
+{#- One invoice's page: its story (7 plain-language steps, redrawn live by live.js while it runs; the decision panel
+    inside step 7 when it waits for you), then "Invoice details" (original document beside the extracted fields,
+    every flag, the over-$10K checklist, open questions, the analyst and VP exchange) and the Invoices list beside it. -#}
+{% extends "base.html" %}
+{% block title %}{{ story.file_name }}{% endblock %}
+{% block head %}{% if story.live %}<noscript><meta http-equiv="refresh" content="3"></noscript>{% endif %}{% endblock %}
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/">← Process another invoice</a></nav>
+
+<div class="layout">
+  <div class="main-col">
+    {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
+
+    <section class="story" aria-labelledby="story-title"{% if story.live %} data-live-run="{{ story.run_id }}"{% endif %}>
+      <header class="story-head">
+        <h1 id="story-title" class="story-file">{{ story.file_name }}</h1>
+        <span class="pill pill-{{ story.status }}" data-live-pill>{{ story.label }}</span>
+      </header>
+      {% include "_steps.html" %}
+      {% if story.live %}<noscript><p class="hint">This page refreshes every few seconds until the invoice is done.</p></noscript>{% endif %}
+    </section>
+
+    {% include "_details.html" %}
+  </div>
+
+  {% if runs %}
+  <aside class="runs" aria-labelledby="runs-title">
+    <h2 id="runs-title">Invoices</h2>
+    <div class="run-list" role="list">
+      {% for r in runs %}
+      <a class="run" role="listitem" href="/invoices/{{ r.run_id }}"{% if r.selected %} aria-current="page"{% endif %}>
+        <span class="run-name">{{ r.name }}</span>
+        <span class="run-meta"><span class="pill pill-{{ r.status }}">{{ r.label }}</span><span class="num">{{ r.amount }}</span></span>
+      </a>
+      {% endfor %}
+    </div>
+  </aside>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{#- Home: a short explanation, the drop card (choosing a file only selects it; "Process this invoice" starts it and
+    opens that invoice's page) and the dashboard of every invoice: summary tiles, then a table (cards on a phone)
+    with anything waiting for you first. live.js refreshes the dashboard while invoices are running. -#}
+{% extends "base.html" %}
+{% block title %}Invoices{% endblock %}
+{% block content %}
+<div class="intro">
+  <h1>Invoice review</h1>
+  <p class="lede">Drop in an invoice and watch it get processed: an AI agent reads it, code checks it against Acme's inventory and rules, an analyst and a VP agent debate it, and then it is paid, rejected or handed to you.</p>
+</div>
+
+{% if missing %}<div class="notice notice-warn" role="alert">That invoice wasn't found. It may have been removed when the databases were reset.</div>{% endif %}
+
+<div class="intake">
+  <form class="dropzone" method="post" action="/upload" enctype="multipart/form-data" data-dropzone>
+    <p class="dz-title">Drop an invoice here, or choose a file</p>
+    <p class="hint">PDF, TXT, JSON, CSV or XML, up to 5 MB</p>
+    <div class="dz-row">
+      {#- The native input is hidden with inline styles (so it stays hidden even if the stylesheet fails to load);
+          it is still focusable and opens the file chooser through its label. -#}
+      <input id="upload-file" class="file-input" name="file" type="file" accept=".pdf,.txt,.json,.csv,.xml" required
+        style="position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;opacity:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap">
+      <label class="btn btn-secondary" for="upload-file">Choose a file</label>
+      <button type="submit" class="btn btn-approve">Process this invoice</button>
+    </div>
+    <p class="dz-chosen" aria-live="polite" data-chosen></p>
+  </form>
+  <form method="post" action="/process-samples" class="samples">
+    <span class="hint">No file handy?</span>
+    <button type="submit" class="btn btn-quiet">Run all {{ sample_count }} sample invoices</button>
+  </form>
+</div>
+
+{% include "_dashboard.html" %}
+{% endblock %}

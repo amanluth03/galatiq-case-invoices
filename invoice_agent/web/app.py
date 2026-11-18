@@ -1,7 +1,7 @@
-"""The review screen: one page that tells each invoice's story as it moves through the pipeline
-(read -> extract -> validate -> analyst/VP approval -> guardrail -> pay / reject / waiting for you).
-Drop in a file (or run the whole sample set) and it runs in a background thread; every step appears as soon as it
-happens, and a run paused for a person is approved or rejected right in its story (resumed via runner.resume_review).
+"""The review screen at the end of the pipeline (read -> extract -> validate -> analyst/VP approval -> guardrail ->
+pay / reject / waiting for you). Home (/) has the drop card and a dashboard of every invoice; each invoice has its own
+page (/invoices/<id>) telling its story live, step by step, with the full invoice details under it. Files run in
+background threads, and a run paused for a person is approved or rejected on its page (via runner.resume_review).
 Everything shown is plain language for a PE analyst/VP: dollars, risks and reasons, never codes or raw JSON.
 """
 import hashlib
@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
@@ -23,17 +24,17 @@ from invoice_agent.graph import Deps
 from invoice_agent.infra import db
 from invoice_agent.infra.config import Settings
 from invoice_agent.infra.logging_setup import RUN_LOGGER
-from invoice_agent.models import FinalOutcome, PipelineState, Round, Uncertainty
+from invoice_agent.models import FinalOutcome, PipelineState, Round
 from invoice_agent.runner import (
     _paid_checkpoint, build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
 )
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
-from invoice_agent.web.highlight import highlight
 from invoice_agent.web.security import ALLOWED_HOSTS, is_same_origin, needs_origin_check
 from invoice_agent.web.story import (
     NOT_STARTED, QUEUED, STATUS_LABELS, blocking_summary, build_story, display_name, lookup_text, money,
     plain_message, story_json,
 )
+from invoice_agent.web.views import dashboard_view, details_view, sort_rows
 
 log = logging.getLogger(RUN_LOGGER)
 
@@ -50,6 +51,13 @@ TOO_LARGE_MESSAGE = "Invoices can be up to 5 MB. This one is larger, so it wasn'
 INTERRUPTED_REASON = "Processing was interrupted: re-upload the file to try again."
 # How many tool lookups a running agent shows at once (the latest ones).
 MAX_LOOKUPS = 6
+STATIC_DIR = HERE / "static"
+
+
+def static_versions(directory: Path = STATIC_DIR) -> dict[str, str]:
+    """A short hash of each static file's contents, computed once at startup.
+    Added to every static URL (?v=<hash>), so a browser never pairs a new page with a stale cached stylesheet."""
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest()[:10] for p in directory.iterdir() if p.is_file()}
 
 
 def _declared_length(request: Request) -> int:
@@ -100,7 +108,13 @@ def run_story(conn: sqlite3.Connection, row: dict):
     if state.get("duplicate_of"):
         other = db.get_run(conn, state["duplicate_of"])
         original = display_name(other["run_id"], other["source_path"]) if other else None
-    return build_story(state, row.get("stage"), live, original_name=original, decided_at=row.get("updated_at"))
+    return build_story(state, row.get("stage"), live, original_name=original, decided_at=row.get("updated_at"),
+                       now=datetime.now(timezone.utc))
+
+
+def running_title(steps) -> str | None:
+    """The title of the step a live run is on (e.g. "Analyst agent is investigating..."), or None."""
+    return next((s.title for s in steps if s.state == "running"), None)
 
 
 def status_label(row: dict) -> str:
@@ -111,9 +125,9 @@ def status_label(row: dict) -> str:
 
 
 def list_view(rows: list[dict], selected: str | None) -> list[dict]:
-    """The compact "Invoices" list: file name, status pill and amount for every run."""
+    """The compact "Invoices" sidebar on an invoice page: file name, status pill and amount, waiting ones first."""
     items = []
-    for row in rows:
+    for row in sort_rows(rows):
         inv = row_state(row).get("invoice")
         items.append({
             "run_id": row["run_id"], "name": display_name(row["run_id"], row["source_path"]) or row["run_id"],
@@ -124,35 +138,32 @@ def list_view(rows: list[dict], selected: str | None) -> list[dict]:
     return items
 
 
-def _humanize_reason(u: Uncertainty) -> str:
-    """Turn an uncertainty's reason into reviewer-friendly words, for the highlight tooltips."""
-    if u.reason.startswith("ingestion agent confidence"):
-        return "The reader wasn't fully sure of this value." if u.confidence == "medium" else \
-            "The reader was unsure of this value."
-    return u.reason[0].upper() + u.reason[1:] if u.reason else ""
-
-
 def story_view(conn: sqlite3.Connection, row: dict) -> dict:
-    """Everything the story section shows for one run: header, the 7 steps, the original document and the panel."""
+    """Everything an invoice page shows: header, the 7 steps, the decision panel's facts and the invoice details."""
     state = row_state(row)
     live = row_status(row) == "PROCESSING"
+    if live and row.get("stage") in NOT_STARTED:
+        # A re-run's row still holds the previous result until the first step finishes: show none of it.
+        state = {"run_id": row["run_id"]}
     inv, flags = state.get("invoice"), state.get("flags") or []
-    raw_text = None if live and row.get("stage") in NOT_STARTED else state.get("raw_text")
-    uncs = state.get("uncertainties") or []
     return {
         "run_id": row["run_id"], "live": live, "status": row_status(row).lower(), "label": status_label(row),
         "file_name": display_name(row["run_id"], row["source_path"]) or row["run_id"],
         "steps": run_story(conn, row),
-        # Tooltips on the highlights get the same plain-language reasons as the story's "unsure about".
-        "source": highlight(raw_text, [u.model_copy(update={"reason": _humanize_reason(u)}) for u in uncs])
-        if raw_text else None,
-        "uncertain_count": len(uncs),
+        "details": details_view(state),
         "awaiting": row_status(row) == "NEEDS_HUMAN_REVIEW",
         "vendor": (inv.vendor if inv else None) or "the vendor",
         "approve_amount": money(inv.total, inv.currency) if inv else "",
         "blocking": [plain_message(f.message) for f in flags if f.severity == "must_reject"],
         "blocking_summary": blocking_summary(flags),
     }
+
+
+def home_view(conn: sqlite3.Connection, rows: list[dict]) -> dict:
+    """The home dashboard for every run: summary tiles and one table row each."""
+    states = {r["run_id"]: row_state(r) for r in rows}
+    running = {r["run_id"]: running_title(run_story(conn, r)) for r in rows if row_status(r) == "PROCESSING"}
+    return dashboard_view(rows, states, running)
 
 
 # ---------- background processing ----------
@@ -197,7 +208,8 @@ def progress_recorder(conn: sqlite3.Connection, run_id: str) -> Callable[[tuple,
             # Inside the approval loop: the rounds so far (each analyst recommendation, then the VP's review).
             partial["live_rounds"] = update.get("rounds") or []
             partial["live_lookups"] = []
-            db.save_progress(conn, run_id, None, partial)
+            # The next agent starts now (VP after the analyst, analyst after a send-back): restart its clock.
+            db.save_progress(conn, run_id, None, partial, new_step=True)
         elif len(namespace) > 1:
             # Inside an agent's own tool loop: show what it is looking up.
             lookups = _tool_lookups(update)
@@ -257,8 +269,15 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
     runtime_factory = runtime_factory or (lambda: build_runtime(settings))
     uploads = settings.var_dir / "uploads"
     app = FastAPI(title="Invoice review", docs_url=None, redoc_url=None, openapi_url=None)
-    app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
+    versions = static_versions()
+
+    def static_url(name: str) -> str:
+        """A static file's URL with its content hash, so every change to the file is fetched fresh."""
+        return f"/static/{name}?v={versions.get(name, '0')}"
+
+    templates.env.globals["static_url"] = static_url
     # Answer only to local host names, so a hostile site can't reach this server via DNS rebinding.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     # One decision at a time: two quick clicks must never resume (and pay) the same run twice.
@@ -304,19 +323,23 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         """Render a template with the request in context."""
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
-    def render_page(request: Request, conn: sqlite3.Connection, row: dict | None, status_code: int = 200,
-                    **extra) -> HTMLResponse:
-        """The one page: drop zone, the story of `row` (or the empty state) and the Invoices list beside it."""
+    def render_home(request: Request, conn: sqlite3.Connection, status_code: int = 200, **extra) -> HTMLResponse:
+        """Home: the drop card and the dashboard of every invoice."""
         rows = db.list_runs(conn)
-        context = {"story": story_view(conn, row) if row else None,
-                   "runs": list_view(rows, row["run_id"] if row else None),
-                   "sample_count": len(invoice_files(SAMPLES_DIR)),
-                   "error": None, "notice": None, "missing": False, "form": {}, **extra}
-        return render(request, "story.html", context, status_code)
+        context = {"board": home_view(conn, rows), "sample_count": len(invoice_files(SAMPLES_DIR)),
+                   "missing": False, **extra}
+        return render(request, "home.html", context, status_code)
+
+    def render_page(request: Request, conn: sqlite3.Connection, row: dict, status_code: int = 200,
+                    **extra) -> HTMLResponse:
+        """An invoice page: the story of `row`, its details, and the Invoices list beside it."""
+        context = {"story": story_view(conn, row), "runs": list_view(db.list_runs(conn), row["run_id"]),
+                   "error": None, "notice": None, "form": {}, **extra}
+        return render(request, "invoice.html", context, status_code)
 
     def not_found(request: Request, conn: sqlite3.Connection) -> HTMLResponse:
-        """A friendly 404: the main page with a notice that the invoice wasn't found."""
-        return render_page(request, conn, None, 404, missing=True)
+        """A friendly 404: the home page with a notice that the invoice wasn't found."""
+        return render_home(request, conn, 404, missing=True)
 
     @app.middleware("http")
     async def same_origin_only(request: Request, call_next):
@@ -331,18 +354,21 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if request.url.path == "/upload" and too_big:
             # Refuse before the body is parsed; the route checks the real size again as a backstop.
             return refuse(request, 413, "File too large", TOO_LARGE_MESSAGE)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            # Always revalidate: a browser must never keep using an old stylesheet with a newer page.
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
-        """The main page, showing the story of the invoice that matters most now (running, then waiting, then newest)."""
-        rows = db.list_runs(conn)
-        return render_page(request, conn, rows[0] if rows else None)
+        """Home: the drop card and the dashboard of every invoice (waiting for you first, then running, then newest)."""
+        return render_home(request, conn)
 
     @app.get("/invoices/{run_id}", response_class=HTMLResponse)
     def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0,
                conn: sqlite3.Connection = Depends(request_conn)):
-        """The main page showing one invoice's story (live while it runs)."""
+        """One invoice's page: its story (live while it runs) and full details."""
         row = db.get_run(conn, run_id)
         if row is None:
             return not_found(request, conn)

@@ -9,11 +9,12 @@ def unc(raw, confidence="medium", reason="looks like a letter O, not a zero"):
 
 
 def test_highlight_escapes_html():
-    """Vendor text is escaped (no live <script>) and the uncertain snippet is wrapped in a confidence-tinted mark."""
+    """Vendor text is escaped (no live <script>) and the uncertain snippet is wrapped in a focusable, confidence-tinted
+    mark that carries its reason for the tooltip."""
     out = str(highlight("<script>x</script> & 26-Jan-2O26", [unc("26-Jan-2O26")]))
     assert "&lt;script&gt;" in out and "&amp;" in out
     assert "<script>" not in out
-    assert '<mark class="conf-medium" title="looks like a letter O, not a zero">26-Jan-2O26</mark>' in out
+    assert '<mark class="conf-medium" tabindex="0" data-reason="looks like a letter O, not a zero">26-Jan-2O26</mark>' in out
 
 
 def test_highlight_missing_snippet_is_skipped():
@@ -28,7 +29,7 @@ def test_highlight_overlapping_snippet_is_skipped():
     assert out.count("<mark") == 1 and 'class="conf-low"' in out
 
 
-def test_highlight_escapes_reason_in_title():
-    """A reason containing quotes or tags cannot break out of the title attribute."""
+def test_highlight_escapes_reason_in_attribute():
+    """A reason containing quotes or tags cannot break out of the data-reason attribute."""
     out = str(highlight("abc", [unc("abc", reason='"><script>')]))
     assert "<script>" not in out and "&#34;&gt;&lt;script&gt;" in out

@@ -1,0 +1,152 @@
+{#- "Invoice details" under the story: the original document (uncertain spots highlighted, with a tooltip saying why)
+    beside the extracted fields and line items (stacked on a phone), every flag by severity, the over-$10K checklist,
+    the agents' open questions and the full analyst and VP exchange. Live runs show the parts that exist so far. -#}
+{% set d = story.details %}
+{% if d.read or d.errored %}
+<section class="details" aria-labelledby="details-title">
+  <h2 id="details-title" class="details-title">Invoice details</h2>
+
+  <div class="cols">
+    <section class="card doc-pane" aria-labelledby="doc-title">
+      <h3 id="doc-title">Original document</h3>
+      {% if d.source %}
+      {% if d.uncertain_count %}
+      <p class="legend"><mark class="conf-low">Unsure</mark> <mark class="conf-medium">Somewhat sure</mark> <span>Highlighted: the reader wasn't sure. Hover or tab to see why.</span></p>
+      {% elif d.extracted %}
+      <p class="hint">The reader was confident about every value in this document.</p>
+      {% endif %}
+      <pre class="doc" tabindex="0" aria-label="Original invoice text">{{ d.source }}</pre>
+      {% else %}
+      <p class="muted">The file couldn't be read, so there's no text to show.</p>
+      {% endif %}
+    </section>
+
+    <div class="facts">
+      {% if d.fields %}
+      <section class="card" aria-labelledby="fields-title">
+        <h3 id="fields-title">What the reader extracted</h3>
+        <table class="kv">
+          <tbody>
+            {% for f in d.fields %}
+            <tr{% if f.unc %} class="tint conf-{{ f.unc.confidence }}"{% endif %}>
+              <th scope="row">{{ f.label }}</th>
+              <td{% if f.money %} class="num"{% endif %}>{{ f.value }}
+                {% if f.unc %}
+                <div class="unc"><span class="conf-badge conf-{{ f.unc.confidence }}">{{ f.unc.label }}</span>
+                  {% if f.unc.raw %}Document says <q class="raw">{{ f.unc.raw }}</q>. {% endif %}{{ f.unc.reason }}</div>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+
+      {% if d.lines %}
+      <section class="card" aria-labelledby="lines-title">
+        <h3 id="lines-title">Line items</h3>
+        <div class="table-scroll">
+          <table class="lines">
+            <thead><tr><th scope="col">Item</th><th scope="col" class="num">Qty</th><th scope="col" class="num">Unit price</th><th scope="col" class="num">Line total</th></tr></thead>
+            <tbody>
+              {% for l in d.lines %}
+              <tr{% if l.severity %} class="line-{{ l.severity }}"{% endif %}>
+                <td{% if l.unc.name %} class="tint conf-{{ l.unc.name.confidence }}"{% endif %}>
+                  <span class="item-name">{{ l.name }}</span>
+                  {% if l.sku %}<span class="item-sub">Matched to {{ l.sku }}</span>{% endif %}
+                  {% if l.suggestion %}<span class="item-sub">Closest match: {{ l.suggestion }} (not applied)</span>{% endif %}
+                  {% if l.note %}<span class="item-sub">Note: {{ l.note }}</span>{% endif %}
+                  {% if l.unc.name %}<span class="item-sub">{{ l.unc.name.label }}{% if l.unc.name.raw %}: document says <q class="raw">{{ l.unc.name.raw }}</q>{% endif %}</span>{% endif %}
+                </td>
+                {% for key, value in (("qty", l.qty), ("unit_price", l.unit_price), ("line_total", l.line_total)) %}
+                <td class="num{% if l.unc[key] %} tint conf-{{ l.unc[key].confidence }}{% endif %}">{{ value }}
+                  {% if l.unc[key] %}<span class="item-sub">{{ l.unc[key].label }}{% if l.unc[key].raw %}: <q class="raw">{{ l.unc[key].raw }}</q>{% endif %}</span>{% endif %}
+                </td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if d.validated or d.errored %}
+  <section class="card" aria-labelledby="issues-title">
+    <h3 id="issues-title">What the checks found</h3>
+    {% if d.flag_groups %}
+      {% for g in d.flag_groups %}
+      <div class="flag-group sev-{{ g.severity }}">
+        <h4><span class="sev-badge sev-{{ g.severity }}">{{ g.title }}</span> <span class="hint">{{ g.hint }}</span></h4>
+        <div class="flags" role="list">
+          {% for f in g.flags %}<p class="flag" role="listitem"><span class="flag-title">{{ f.title }}</span><span class="flag-msg">{{ f.message }}</span></p>{% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    {% elif not d.validated %}
+      <p class="muted">No checks ran because the file couldn't be processed.</p>
+    {% else %}
+      <p class="ok">No issues: every check passed.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if d.checklist %}
+  <section class="card" aria-labelledby="checklist-title">
+    <h3 id="checklist-title">Over-$10K checklist</h3>
+    <p class="hint">The analyst must answer each item before the VP can sign off on an invoice this size.</p>
+    <dl class="checklist">
+      {% for c in d.checklist %}
+      <div class="check{% if not c.answer %} check-missing{% endif %}">
+        <dt>{{ c.label }}</dt>
+        <dd>{{ c.answer or "Not answered" }}</dd>
+      </div>
+      {% endfor %}
+    </dl>
+  </section>
+  {% endif %}
+
+  {% if d.open_questions %}
+  <section class="card" aria-labelledby="questions-title">
+    <h3 id="questions-title">Open questions</h3>
+    <p class="hint">What the agents couldn't settle from the documents alone.</p>
+    <ul class="questions">
+      {% for q in d.open_questions %}<li>{{ q }}</li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if d.rounds %}
+  <details class="card timeline">
+    <summary><span class="summary-title">How the agents decided</span> <span class="hint">{{ d.rounds | length }} round{{ "s" if d.rounds | length != 1 }} between the analyst and the VP</span></summary>
+    <div class="rounds">
+      {% for r in d.rounds %}
+      <section class="round" aria-label="Round {{ r.number }}">
+        <h4>Round {{ r.number }}</h4>
+        <div class="turn">
+          <p class="who">Analyst <span class="tag tag-{{ r.decision | lower }}">recommends {{ "approving" if r.decision == "APPROVE" else "rejecting" }}</span></p>
+          <p class="said">{{ r.reasoning }}</p>
+          {% if r.evidence %}
+          <ul class="evidence">{% for e in r.evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+          {% endif %}
+        </div>
+        {% if r.review %}
+        <div class="turn turn-vp">
+          <p class="who">VP
+            {% if r.review.accepted %}<span class="tag tag-{{ (r.review.final_decision or '') | lower }}">agreed: {{ "approve" if r.review.final_decision == "APPROVE" else "reject" }}</span>
+            {% else %}<span class="tag tag-back">sent it back</span>{% endif %}
+          </p>
+          <p class="said">{{ r.review.reasoning }}</p>
+          {% if r.review.feedback and not r.review.accepted %}<p class="said feedback"><span class="label-inline">Asked for:</span> {{ r.review.feedback }}</p>{% endif %}
+        </div>
+        {% endif %}
+      </section>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+</section>
+{% endif %}

@@ -1,21 +1,23 @@
-/* Live story for the review screen (no libraries, no external assets).
-   - A story with data-live-run polls /invoices/<id>/status every second and redraws its 7 steps from the JSON
-     (textContent only, never innerHTML, so nothing from an invoice can run as code). When the run finishes it
-     stops polling and reloads once, so the finished page (decision panel, original document) is server-rendered.
-   - The upload form gets drag-and-drop. Dropping or choosing a file only selects it (its name is shown);
-     processing starts when the user presses "Process this invoice". */
+/* Review screen behaviour (no libraries, no external assets; text is only ever set with textContent).
+   - Invoice page: a running story (data-live-run) polls /invoices/<id>/status every second and redraws its 7 steps.
+     When the run finishes, the pill is updated and the page reloads once so the finished page (decision panel,
+     full details) is server-rendered.
+   - Home: choosing or dropping a file only selects it ("<name> ready"); "Process this invoice" starts it. While
+     invoices run, the dashboard is refreshed from the server every 2 seconds. Each dashboard row opens its invoice.
+   - Original document: hovering, focusing or tapping a highlight shows why the reader was unsure, in a tooltip. */
 (function () {
   "use strict";
 
   var POLL_MS = 1000;
+  var BOARD_MS = 2000;
   var STATE_WORDS = { pending: "not started", running: "in progress", done: "done",
                       warn: "done, with warnings", failed: "failed", skipped: "skipped" };
-  var fileInput = document.querySelector("[data-dropzone] input[type=file]");
 
-  /* Build one step's <li> exactly as the server template does. */
+  /* Build one step exactly as the server template (_steps.html) does. */
   function stepItem(s) {
-    var li = document.createElement("li");
-    li.className = "st st-" + s.state;
+    var item = document.createElement("div");
+    item.className = "st st-" + s.state;
+    item.setAttribute("role", "listitem");
     var mark = document.createElement("span");
     mark.className = "st-mark";
     mark.setAttribute("aria-hidden", "true");
@@ -30,19 +32,26 @@
     title.appendChild(sr);
     body.appendChild(title);
     if (s.lines.length) {
-      var ul = document.createElement("ul");
-      ul.className = "st-lines";
+      var lines = document.createElement("div");
+      lines.className = "st-lines";
       s.lines.forEach(function (l) {
-        var item = document.createElement("li");
-        item.className = "ln ln-" + l.kind;
-        item.textContent = l.text;
-        ul.appendChild(item);
+        var p = document.createElement("p");
+        p.className = "ln ln-" + l.kind;
+        p.textContent = l.text;
+        lines.appendChild(p);
       });
-      body.appendChild(ul);
+      body.appendChild(lines);
     }
-    li.appendChild(mark);
-    li.appendChild(body);
-    return li;
+    item.appendChild(mark);
+    item.appendChild(body);
+    return item;
+  }
+
+  /* Set a status pill's text and colour (pill-paid, pill-rejected, ...), so it never keeps saying "Running". */
+  function setPill(pill, status, label) {
+    if (!pill) return;
+    pill.textContent = label;
+    pill.className = "pill pill-" + String(status).toLowerCase();
   }
 
   /* Poll one running story until it finishes; stop for good if the page is left or the server can't be reached. */
@@ -72,8 +81,9 @@
           if (stopped) return;
           if (s.finished) {
             stop();
-            // Reload once to the full page, unless the user has picked a file to upload (a reload would drop it).
-            if (!(fileInput && fileInput.files && fileInput.files.length)) window.location.reload();
+            // Show the outcome at once, then load the full finished page.
+            setPill(pill, s.status, s.label);
+            window.location.reload();
             return;
           }
           var json = JSON.stringify(s.steps);
@@ -83,14 +93,14 @@
             var fresh = document.createDocumentFragment();
             s.steps.forEach(function (step) { fresh.appendChild(stepItem(step)); });
             list.replaceChildren(fresh);
-            if (pill) pill.textContent = s.label;
+            setPill(pill, s.status, s.label);
           }
           timer = setTimeout(tick, POLL_MS);
         })
         .catch(function () {
           stop();
-          // Say so instead of spinning forever.
-          if (pill) pill.textContent = "Lost touch with the server: refresh to check";
+          // Say so instead of spinning forever (and drop the "Running" look).
+          setPill(pill, "error", "Lost touch with the server: refresh to check");
         });
     }
     timer = setTimeout(tick, POLL_MS);
@@ -98,11 +108,47 @@
 
   var live = document.querySelector("[data-live-run]");
   if (live) watch(live);
-  // Coming back via the back button can restore this page from cache with polling stopped: reload it fresh.
-  window.addEventListener("pageshow", function (e) { if (e.persisted && live) window.location.reload(); });
 
-  /* Drag-and-drop on the upload form: a dropped file is selected (not sent) and its name shown. */
+  /* Home dashboard: while invoices run, swap in the server's fresh dashboard (parsed, never run as script). */
+  var boardTimer = null;
+  function refreshBoard() {
+    var board = document.querySelector("[data-dashboard]");
+    if (!board || !board.hasAttribute("data-live")) return;
+    boardTimer = setTimeout(function () {
+      fetch("/", { cache: "no-store" })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          return resp.text();
+        })
+        .then(function (html) {
+          var fresh = new DOMParser().parseFromString(html, "text/html").querySelector("[data-dashboard]");
+          var current = document.querySelector("[data-dashboard]");
+          if (fresh && current) current.replaceWith(document.importNode(fresh, true));
+          refreshBoard();
+        })
+        .catch(function () { /* Server unreachable: keep the last dashboard; a refresh tries again. */ });
+    }, BOARD_MS);
+  }
+  refreshBoard();
+  window.addEventListener("pagehide", function () { if (boardTimer) clearTimeout(boardTimer); });
+
+  // Coming back via the back button can restore a page from cache with polling stopped: reload it fresh.
+  window.addEventListener("pageshow", function (e) {
+    if (e.persisted && (live || document.querySelector("[data-dashboard][data-live]"))) window.location.reload();
+  });
+
+  /* A click anywhere on a dashboard row opens that invoice (the file name inside is the keyboard link). */
+  document.addEventListener("click", function (e) {
+    var row = e.target.closest && e.target.closest("tr[data-href]");
+    if (!row || e.target.closest("a, button")) return;
+    // Selecting text in a row isn't a click to open it.
+    if (window.getSelection && String(window.getSelection())) return;
+    window.location.href = row.getAttribute("data-href");
+  });
+
+  /* Upload form: a chosen or dropped file is only selected (never sent) and its name shown. */
   var zone = document.querySelector("[data-dropzone]");
+  var fileInput = zone && zone.querySelector("input[type=file]");
   var chosen = document.querySelector("[data-chosen]");
   function showChosen() {
     if (!chosen) return;
@@ -126,7 +172,62 @@
       fileInput.files = e.dataTransfer.files;
       showChosen();
     });
+    // Pressing Process with nothing chosen: say so and open the chooser, instead of the browser pointing at the
+    // hidden input.
+    fileInput.addEventListener("invalid", function (e) {
+      e.preventDefault();
+      if (chosen) chosen.textContent = "Choose a file first.";
+      fileInput.click();
+    });
     // A file kept by the browser after going back still shows as chosen.
     showChosen();
   }
+
+  /* Tooltips on the original document's highlights: one shared box, fixed to the viewport so the document's
+     scroll pane can't clip it; above the highlight, or below when there is no room above. */
+  var tip = null;
+  var tipFor = null;
+  function hideTip() {
+    if (tip) tip.hidden = true;
+    tipFor = null;
+  }
+  function showTip(mark) {
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "tip";
+      tip.id = "doc-tip";
+      tip.setAttribute("role", "tooltip");
+      document.body.appendChild(tip);
+    }
+    tip.textContent = mark.getAttribute("data-reason");
+    tip.hidden = false;
+    mark.setAttribute("aria-describedby", "doc-tip");
+    tipFor = mark;
+    var r = mark.getBoundingClientRect();
+    var w = tip.offsetWidth, h = tip.offsetHeight, gap = 8;
+    var left = Math.max(12, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 12));
+    var top = r.top - h - gap;
+    if (top < 8) top = r.bottom + gap;  // near the top of the window: flip below
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+  function markOf(target) {
+    return target && target.closest ? target.closest(".doc mark[data-reason]") : null;
+  }
+  document.addEventListener("mouseover", function (e) {
+    var m = markOf(e.target);
+    if (m) showTip(m); else if (tipFor && !tipFor.contains(document.activeElement)) hideTip();
+  });
+  document.addEventListener("focusin", function (e) {
+    var m = markOf(e.target);
+    if (m) showTip(m); else hideTip();
+  });
+  // A tap on a phone shows it; tapping anywhere else hides it.
+  document.addEventListener("click", function (e) {
+    var m = markOf(e.target);
+    if (m) showTip(m); else hideTip();
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") hideTip(); });
+  // Scrolling the page or the document pane moves the highlight: keep the box with it.
+  document.addEventListener("scroll", function () { if (tipFor) showTip(tipFor); }, true);
 })();

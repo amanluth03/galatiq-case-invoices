@@ -1,5 +1,5 @@
-"""Tests for the review screen (main page, invoice story, Invoices list, decision panel, status JSON) via FastAPI's
-TestClient, with fake agents and a tmp database."""
+"""Tests for the review screen (home dashboard, invoice page with its story and details, Invoices sidebar, decision
+panel, status JSON, cache-safe static files) via FastAPI's TestClient, with fake agents and a tmp database."""
 from decimal import Decimal
 
 import pytest
@@ -43,31 +43,43 @@ def client_for(conn, extractions, **kw):
     return client, deps, graph, pay
 
 
-def test_invoices_list_shows_waiting_first_with_plain_pills(conn):
-    """The Invoices list puts runs waiting for a person above newer finished ones, with plain status pills,
-    and the main page tells the story of the top one."""
+def test_home_dashboard_shows_tiles_and_waiting_first(conn):
+    """Home is the drop card plus a dashboard: tiles with counts and dollar totals, then every invoice with the
+    one waiting for a person first (finished ones newest first). It never shows a story inline."""
     seed(conn, "r1", "NEEDS_HUMAN_REVIEW", "INV-REVIEW", "12000.00")
     seed(conn, "p1", "PAID", "INV-PAID", "5000.00")
     seed(conn, "x1", "REJECTED", "INV-REJ", "750.00",
-         [Flag(severity="must_reject", code="unknown_item", message="Gizmo: not in inventory", field_path="items[0]")])
+         [Flag(severity="must_reject", code="unknown_item", message="Gizmo isn't in inventory", field_path="items[0]")])
     client, *_ = client_for(conn, [])
     html = client.get("/").text
-    runs = html[html.index('class="runs"'):]
+    board = html[html.index("data-dashboard"):]
     # The review run is the oldest, yet listed first; finished runs follow newest first.
-    assert runs.index("INV-REVIEW.txt") < runs.index("INV-REJ.txt") < runs.index("INV-PAID.txt")
-    assert "Waiting for you" in runs and ">Paid<" in runs and ">Rejected<" in runs and "$12,000.00" in runs
-    assert 'href="/invoices/r1" aria-current="page"' in html
-    # The old dashboard header and queue table are gone.
-    assert "awaiting your review" not in html and "<table" not in html
+    assert board.index("INV-REVIEW.txt") < board.index("INV-REJ.txt") < board.index("INV-PAID.txt")
+    assert "Waiting for you" in board and ">Paid<" in board and ">Rejected<" in board
+    assert "$12,000.00 at stake" in board and "tile-hot" in board and "$5,000.00" in board and "$750.00" in board
+    assert "Hard rule: 1 item isn&#39;t in inventory" in board and 'href="/invoices/r1"' in board
+    assert "data-live-steps" not in html and "data-live-run" not in html
+
+
+def test_invoice_page_has_sidebar_and_way_home(conn):
+    """An invoice page keeps the Invoices list beside its story (this one marked current) and links back home."""
+    seed(conn, "r1", "NEEDS_HUMAN_REVIEW", "INV-REVIEW", "12000.00")
+    seed(conn, "p1", "PAID", "INV-PAID", "5000.00")
+    client, *_ = client_for(conn, [])
+    html = client.get("/invoices/p1").text
+    runs = html[html.index('class="runs"'):]
+    assert runs.index("INV-REVIEW.txt") < runs.index("INV-PAID.txt")
+    assert 'href="/invoices/p1" aria-current="page"' in runs
+    assert "Process another invoice" in html and 'action="/upload"' not in html
 
 
 def test_empty_main_page_shows_drop_zone_and_hint(conn):
-    """A fresh start shows only the drop zone, the samples button and a hint which file to try."""
+    """A fresh start shows the drop card, the samples button and a hint which file to try, and no tiles yet."""
     client, *_ = client_for(conn, [])
     html = client.get("/").text
     assert "Drop an invoice here, or choose a file" in html and 'type="file"' in html
     assert "Run all 20 sample invoices" in html and "invoice_1010.txt" in html
-    assert 'class="runs"' not in html and "data-live-run" not in html
+    assert 'class="tiles"' not in html and "data-live-run" not in html
 
 
 def test_story_shows_plain_steps_and_no_raw_json(conn):
@@ -81,7 +93,7 @@ def test_story_shows_plain_steps_and_no_raw_json(conn):
                   "4. Analyst agent", "5. VP agent reviews", "6. Guardrail", "7. Decision: Waiting for you"):
         assert title in html
     assert "the agents couldn&#39;t agree after 3 rounds" in html and "Round 3" in html
-    assert "Widgets Inc., $5,000.00" in html and "Show the original document" in html
+    assert "Widgets Inc., $5,000.00" in html and "Invoice details" in html and "Original document" in html
     assert '{"' not in html and '{&#34;' not in html and "NEEDS_HUMAN_REVIEW" not in html
     # Decision panel is shown only for runs waiting for a person.
     assert 'name="decision"' in html and "Approve and pay $5,000.00" in html
@@ -117,14 +129,15 @@ def test_detail_unknown_run_is_404(conn):
 
 def test_decision_requires_justification_over_blocking_flags(conn):
     """Approving over a must_reject flag with a blank justification is refused on-page (400), keeps the typed note and pays nothing."""
-    client, deps, graph, pay = client_for(conn, [extracted_1002()], send_back=True)
-    state = process_file(INVOICES / "invoice_1002.txt", deps, graph)
-    assert state["final"].status == "NEEDS_HUMAN_REVIEW"
-    resp = client.post(f"/invoices/{state['run_id']}/decision",
+    # A run paused before hard-rule invoices skipped the agents can still wait for a person with a blocking flag.
+    seed(conn, "r1", "NEEDS_HUMAN_REVIEW", "INV-REVIEW", "100.00",
+         [Flag(severity="must_reject", code="unknown_item", message="Gizmo isn't in inventory", field_path="items[0]")])
+    client, deps, graph, pay = client_for(conn, [])
+    resp = client.post("/invoices/r1/decision",
                        data={"decision": "APPROVE", "note": "my typed note", "justification": "  "})
     assert resp.status_code == 400
     assert "justification" in resp.text and "my typed note" in resp.text
-    assert db.get_run(conn, state["run_id"])["status"] == "NEEDS_HUMAN_REVIEW" and not pay.calls
+    assert db.get_run(conn, "r1")["status"] == "NEEDS_HUMAN_REVIEW" and not pay.calls
 
 
 def test_decision_approve_resumes_and_redirects(conn):
@@ -151,7 +164,7 @@ def test_error_story_names_the_failed_step_and_times_are_utc(conn):
     seed(conn, "e1", "ERROR", "INV-ERR", "100.00")
     client, *_ = client_for(conn, [])
     html = client.get("/invoices/e1").text
-    assert "st-failed" in html and "Reason for INV-ERR" in html and " UTC</li>" in html
+    assert "st-failed" in html and "Reason for INV-ERR" in html and " UTC</p>" in html
     assert "nothing was paid" in html
 
 
@@ -228,3 +241,62 @@ def test_concurrent_status_requests_do_not_error(conn):
     with ThreadPoolExecutor(max_workers=8) as pool:
         codes = list(pool.map(lambda _: client.get("/invoices/r1/status").status_code, range(64)))
     assert codes == [200] * 64
+
+
+def test_invoice_details_show_fields_flags_and_the_full_exchange(conn):
+    """Under the story, "Invoice details" shows the original document beside the extracted fields and line items,
+    flags grouped by severity, and every analyst/VP round with complete reasoning (collapsible)."""
+    client, deps, graph, _ = client_for(conn, [make_extracted()], send_back=True)
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    html = client.get(f"/invoices/{state['run_id']}").text
+    details = html[html.index('id="details-title"'):]
+    assert "Original document" in details and 'class="doc"' in details
+    assert "What the reader extracted" in details and "Invoice number" in details and "Line items" in details
+    assert "WidgetA" in details and "Unit price" in details
+    assert "What the checks found" in details
+    assert '<details class="card timeline">' in details and "Round 3" in details and "sent it back" in details
+
+
+def test_rule_rejected_invoice_page_shows_flags_and_no_rounds(conn):
+    """A hard-rule rejection's page lists the blocking flag in the details and has no agents' exchange."""
+    client, deps, graph, _ = client_for(conn, [extracted_1002()])
+    state = process_file(INVOICES / "invoice_1002.txt", deps, graph)
+    html = client.get(f"/invoices/{state['run_id']}").text
+    assert ">Blocking<" in html and "Ordered 20 GadgetX, only 5 in stock" in html
+    assert "the agents weren&#39;t needed" in html and "How the agents decided" not in html
+
+
+def test_static_urls_are_versioned_and_revalidated(conn):
+    """Every static URL carries a content hash, and static files are served with Cache-Control: no-cache,
+    so a browser never pairs a new page with an old cached stylesheet."""
+    from invoice_agent.web.app import static_versions
+    client, *_ = client_for(conn, [])
+    html = client.get("/").text
+    versions = static_versions()
+    assert f'/static/styles.css?v={versions["styles.css"]}"' in html
+    assert f'/static/live.js?v={versions["live.js"]}"' in html
+    resp = client.get(f"/static/styles.css?v={versions['styles.css']}")
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "no-cache"
+
+
+def test_page_reads_right_without_css(conn):
+    """Without the stylesheet the page still reads cleanly: the native file input is hidden by inline styles and
+    step numbers come only from the text (no <ol> or bullet lists in the story)."""
+    client, deps, graph, _ = client_for(conn, [make_extracted()])
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    home = client.get("/").text
+    file_input = home[home.index('<input id="upload-file"'):]
+    file_input = file_input[:file_input.index(">")]
+    assert 'style="position:absolute;width:1px;height:1px' in file_input and "opacity:0" in file_input
+    page = client.get(f"/invoices/{state['run_id']}").text
+    story = page[page.index("data-live-steps"):page.index('id="details-title"')]
+    assert "<ol" not in story and "<ul" not in story and "1. Read the file" in story
+
+
+def test_running_page_refreshes_without_javascript(conn):
+    """A running invoice's page carries a noscript refresh, so it still advances with JavaScript off."""
+    client, *_ = client_for(conn, [])
+    db.create_pending_run(conn, "r1", "var/uploads/r1_invoice.txt")
+    db.save_progress(conn, "r1", "read", {"run_id": "r1", "raw_text": "line", "format": "txt"})
+    html = client.get("/invoices/r1").text
+    assert '<noscript><meta http-equiv="refresh" content="3"></noscript>' in html
