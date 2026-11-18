@@ -1,7 +1,11 @@
-"""Test doubles: scripted fake Extractor, Analyst and VP, plus invoice, recommendation and review builders.
+"""Test doubles: scripted fake Extractor, Analyst, VP and chat model, plus invoice, recommendation and review builders.
 Lets pipeline tests run the extract and approval stages without calling the real LLM.
 """
 from typing import NamedTuple
+
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from invoice_agent.models import (
     ExtractedField, ExtractedInvoice, ExtractedLineItem, Recommendation, VPReview,
@@ -114,3 +118,24 @@ def make_review(verdict="ACCEPT", final_decision="APPROVE", feedback=None, **kw)
     """Build a VPReview; for SEND_BACK pass final_decision=None."""
     kw.setdefault("reasoning", "vp reasoning")
     return VPReview(verdict=verdict, final_decision=final_decision, feedback=feedback, **kw)
+
+
+class ToolCallingFakeModel(GenericFakeChatModel):
+    """Fake chat model for create_agent: replies with scripted AIMessages, records the tools bound and the prompts seen."""
+    bound_tools: list = []
+    prompts: list = []
+
+    def bind_tools(self, tools, **kwargs):
+        """Record the tools the agent offers (names only) and keep replying from the script."""
+        self.bound_tools = [convert_to_openai_tool(t)["function"]["name"] for t in tools]
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        """Record the messages this call received, then return the next scripted reply."""
+        self.prompts.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def structured_reply(schema_name: str, args: dict) -> AIMessage:
+    """An AIMessage calling the structured-output tool, which is how ToolStrategy returns the final answer."""
+    return AIMessage(content="", tool_calls=[{"name": schema_name, "args": args, "id": "call-1", "type": "tool_call"}])
