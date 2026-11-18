@@ -232,3 +232,51 @@ def test_find_duplicate_without_invoice_number(conn):
     inv = Invoice(vendor="X", total=D("1"))
     res = find_duplicate(conn, inv, fingerprint(inv), "h", "new")
     assert res.duplicate_of is None and res.flags == []
+
+
+def inv_1013(**kw):
+    """Sample 1013 (8 lines, subtotal 21040.00, tax 1472.80): stated total 22562.80, but lines + tax = 22512.80."""
+    base = dict(invoice_number="INV-1013", vendor="Atlas Industrial Supply", date=date(2026, 1, 24),
+                due_date=date(2026, 3, 24),
+                items=[L("WidgetA", 15, "250.00"), L("WidgetB", 10, "500.00"), L("GadgetX", 5, "750.00"),
+                       L("WidgetA", 5, "240.00"), L("WidgetB", 8, "480.00"), L("GadgetX", 3, "750.00"),
+                       L("WidgetA", 2, "250.00"), L("GadgetX", 1, "750.00")],
+                subtotal=D("21040.00"), tax=D("1472.80"), total=D("22562.80"))
+    base.update(kw)
+    return Invoice(**base)
+
+
+def inv_1007(**kw):
+    """Sample 1007: lines 14750.00 + tax 885.00 = 15635.00, but the stated total is 15525.00 (under-billed)."""
+    base = dict(invoice_number="INV-1007", vendor="MegaWidgets Corp", date=date(2026, 1, 28), due_date=date(2026, 2, 28),
+                items=[L("WidgetA", 20, "250.00"), L("WidgetB", 15, "500.00"), L("GadgetX", 3, "750.00")],
+                subtotal=D("14750.00"), tax=D("885.00"), total=D("15525.00"))
+    base.update(kw)
+    return Invoice(**base)
+
+
+def test_overbilled_total_is_must_reject(conn):
+    """1013's total is $50 more than its lines + tax: must_reject total_exceeds_line_items (plus the arithmetic flag)."""
+    flags = run_validation(conn, inv_1013(), "", [])
+    over = [f for f in flags if f.code == "total_exceeds_line_items"]
+    assert len(over) == 1 and over[0].severity == "must_reject" and over[0].field_path == "total"
+    assert "22562.80" in over[0].message and "22512.80" in over[0].message
+    assert "arithmetic_mismatch" in codes(flags, "needs_scrutiny")
+
+
+def test_underbilled_total_is_only_scrutiny(conn):
+    """1007's total is below its lines + tax: still arithmetic_mismatch (needs_scrutiny), never total_exceeds_line_items."""
+    flags = run_validation(conn, inv_1007(), "", [])
+    assert "total_exceeds_line_items" not in codes(flags)
+    assert "arithmetic_mismatch" in codes(flags, "needs_scrutiny")
+
+
+def test_overbilling_uses_line_amounts_not_stated_subtotal(conn):
+    """An inflated subtotal cannot hide overbilling: the gate compares against the line amounts themselves."""
+    flags = run_validation(conn, inv_1001(subtotal=D("5100.00"), total=D("5100.00")), "", [])
+    assert "total_exceeds_line_items" in codes(flags, "must_reject")
+
+
+def test_clean_total_has_no_overbilling_flag(conn):
+    """1001 reconciles exactly, so no total_exceeds_line_items flag."""
+    assert "total_exceeds_line_items" not in codes(run_validation(conn, inv_1001(), "", []))

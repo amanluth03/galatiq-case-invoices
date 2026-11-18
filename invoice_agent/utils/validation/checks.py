@@ -5,7 +5,7 @@ import re
 import sqlite3
 from decimal import Decimal
 
-from invoice_agent.utils.arithmetic import reconcile
+from invoice_agent.utils.arithmetic import lines_plus_charges, reconcile
 from invoice_agent.infra.config import SCRUTINY_THRESHOLD
 from invoice_agent.infra.db import get_inventory
 from invoice_agent.models import Flag, Invoice
@@ -123,11 +123,21 @@ def check_prices(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
 
 
 def check_arithmetic(inv: Invoice) -> list[Flag]:
-    """Scrutinize every line/subtotal/total mismatch reported by reconcile()."""
-    return [
+    """Scrutinize every mismatch reported by reconcile(); reject a total higher than what the lines add up to."""
+    flags = [
         Flag(severity="needs_scrutiny", code="arithmetic_mismatch", message=m, field_path=m.split(":")[0])
         for m in reconcile(inv)
     ]
+    # Overbilling: we would pay more than the goods + tax + shipping are worth (sample 1013, $50 over).
+    # Compared against the lines, not the stated subtotal, so an inflated subtotal cannot hide it.
+    # Under-billing (sample 1007) stays an arithmetic_mismatch for the agents to explain.
+    expected = lines_plus_charges(inv)
+    if inv.total is not None and expected is not None and inv.total > expected:
+        flags.append(Flag(
+            severity="must_reject", code="total_exceeds_line_items", field_path="total",
+            message=f"stated total {inv.total:.2f} is more than line items + tax + shipping = {expected:.2f}",
+        ))
+    return flags
 
 
 def check_dates(inv: Invoice) -> list[Flag]:

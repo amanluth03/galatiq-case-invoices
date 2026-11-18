@@ -21,6 +21,7 @@ MUST_REJECT flags: always REJECT. No explanation makes these approvable.
 - missing_total: the invoice total is missing.
 - missing_quantity: a line has no quantity, so it cannot be checked against stock.
 - no_line_items: the invoice has no line items.
+- total_exceeds_line_items: the stated total is more than the line items + tax + shipping add up to (overbilling, e.g. 1013).
 - invoice_number_reused: this invoice number was already processed with different contents (possible double-billing, e.g. 1004 vs 1004_revised).
 
 NEEDS_SCRUTINY flags: not an automatic reject, but each one must be explicitly explained in the recommendation. An unexplained deviation means REJECT.

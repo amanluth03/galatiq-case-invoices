@@ -1,5 +1,5 @@
 """Deterministic invoice arithmetic check: line totals, subtotal, and total all reconcile to the cent.
-Runs in the validate stage; mismatches become needs_scrutiny flags, not rejections.
+Runs in the validate stage; mismatches become needs_scrutiny flags, and lines_plus_charges feeds the overbilling gate.
 """
 from decimal import Decimal, InvalidOperation
 
@@ -12,6 +12,29 @@ _CENT = Decimal("0.01")
 def _q(d: Decimal) -> Decimal:
     """Round to cents."""
     return d.quantize(_CENT)
+
+
+def _line_amount(it) -> Decimal | None:
+    """A line's amount: the stated line_total, else qty x unit_price, else None."""
+    if it.line_total is not None:
+        return _q(it.line_total)
+    if it.qty is not None and it.unit_price is not None:
+        return _q(it.qty * it.unit_price)
+    return None
+
+
+def lines_plus_charges(inv: Invoice) -> Decimal | None:
+    """Sum of line amounts + tax + shipping (the same amounts reconcile uses); None when no line has an amount."""
+    try:
+        amounts = [a for a in (_line_amount(it) for it in inv.items) if a is not None]
+        if not amounts:
+            return None
+        tax = _q(inv.tax) if inv.tax is not None else Decimal("0.00")
+        ship = _q(inv.shipping) if inv.shipping is not None else Decimal("0.00")
+        return sum(amounts, Decimal("0.00")) + tax + ship
+    # Absurd magnitudes are already reported by reconcile; nothing to compare here.
+    except InvalidOperation:
+        return None
 
 
 def reconcile(inv: Invoice) -> list[str]:
@@ -37,11 +60,10 @@ def _reconcile(inv: Invoice, msgs: list[str]) -> None:
                     f"items[{i}]: {it.qty} × {_q(it.unit_price)} = {computed}, "
                     f"but line_total is {_q(it.line_total)}"
                 )
-        if it.line_total is not None:
-            amounts.append(_q(it.line_total))
-        elif computed is not None:
-            amounts.append(computed)
-    # Prefer the stated line_total, else qty x unit_price.
+        # Prefer the stated line_total, else qty x unit_price.
+        amount = _line_amount(it)
+        if amount is not None:
+            amounts.append(amount)
     lines_sum = sum(amounts, Decimal("0.00"))
     # Skip the subtotal check when there are no lines: nothing to sum against.
     if inv.subtotal is not None and amounts and lines_sum != _q(inv.subtotal):
