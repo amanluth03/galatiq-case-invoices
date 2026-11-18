@@ -1,10 +1,12 @@
 """Runs the pipeline graph for files: one file, a whole directory, or resuming a paused human review.
 Also builds the real runtime (Grok agents + SQLite checkpointer) and saves every run to the database.
+The web screen calls process_file with on_stage to show each run's progress live.
 """
 import logging
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -60,6 +62,13 @@ def hydrate(state: dict) -> PipelineState:
     return out  # type: ignore[return-value]
 
 
+def keeps_result(existing: dict) -> bool:
+    """True when a prior run of the same file must be returned as-is instead of re-run (paid, paused or human-decided)."""
+    # A human's decision (even a rejection) is never overturned by re-running the agents.
+    decided_by = (existing["state"].get("final") or {}).get("decided_by")
+    return existing["status"] in _KEEP_STATUSES or decided_by == "human"
+
+
 def _summary(update) -> dict:
     """A short log summary of one node's output: final status, flag codes or error."""
     if not isinstance(update, dict):
@@ -106,19 +115,29 @@ def _finish(graph, config: dict, run_id: str, paused: bool, deps: Deps) -> Pipel
     return state  # type: ignore[return-value]
 
 
-def process_file(path: Path, deps: Deps, graph) -> PipelineState:
-    """Run one invoice file through the graph and save the result; never raises for a bad file."""
+def _report_stage(on_stage: Callable[[str], None] | None, node: str, run_id: str) -> None:
+    """Tell the caller a node finished; a failing progress update is logged but never fails the run."""
+    if on_stage is None:
+        return
+    try:
+        on_stage(node)
+    except Exception as exc:
+        log.warning("stage update failed", extra={"fields": {"run_id": run_id, "node": node, "error": str(exc)}})
+
+
+def process_file(path: Path, deps: Deps, graph, run_id: str | None = None,
+                 on_stage: Callable[[str], None] | None = None) -> PipelineState:
+    """Run one invoice file through the graph and save the result; never raises for a bad file.
+    run_id: use this id (the web screen creates the run row first); on_stage: called with each node name as it finishes."""
     path = Path(path)
-    run_id = uuid.uuid4().hex[:12]
+    run_id = run_id or uuid.uuid4().hex[:12]
     content_hash = None
     try:
         # Re-processing policy: look the file up by content, so the same bytes keep the same run id.
         content_hash = read_file(path).content_hash
         existing = db.find_run_by_content_hash(deps.conn, content_hash)
         if existing:
-            # A human's decision (even a rejection) is never overturned by re-running the agents.
-            decided_by = (existing["state"].get("final") or {}).get("decided_by")
-            if existing["status"] in _KEEP_STATUSES or decided_by == "human":
+            if keeps_result(existing):
                 return hydrate(existing["state"])
             # A crash after pay but before the final save leaves ERROR in the DB while the checkpoint says PAID:
             # recover that result instead of re-running, so the vendor is never paid twice.
@@ -145,6 +164,7 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
                 log.info("node_completed", extra={"fields": {
                     "run_id": run_id, "node": node, "duration_ms": round((now - last) * 1000), **_summary(update)}})
                 last = now
+                _report_stage(on_stage, node, run_id)
         return _finish(graph, config, run_id, paused, deps)
     except Exception as exc:
         log.warning("run failed", extra={"fields": {"run_id": run_id, "error": str(exc)}})
@@ -153,11 +173,15 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
         return state
 
 
+def invoice_files(dir: Path) -> list[Path]:
+    """Every supported invoice file in a directory, in filename order."""
+    # Sorted so invoice_1004.json is saved before invoice_1004_revised.json is checked against it.
+    return sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
+
+
 def process_dir(dir: Path, deps: Deps, graph) -> list[PipelineState]:
     """Process every supported file in a directory, in filename order, one after another."""
-    # Sequential and sorted so invoice_1004.json is saved before invoice_1004_revised.json is checked against it.
-    files = sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
-    return [process_file(p, deps, graph) for p in files]
+    return [process_file(p, deps, graph) for p in invoice_files(dir)]
 
 
 def resume_review(run_id: str, decision: str, note: str, justification: str | None,

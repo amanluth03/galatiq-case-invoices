@@ -11,7 +11,8 @@ from pydantic import BaseModel, model_validator
 Confidence = Literal["high", "medium", "low"]
 Severity = Literal["must_reject", "needs_scrutiny", "info"]
 ChecklistKey = Literal["vendor_history", "price_check", "stock_check", "arithmetic", "payment_terms"]
-Status = Literal["PAID", "REJECTED", "NEEDS_HUMAN_REVIEW", "DUPLICATE", "ERROR"]
+# PROCESSING is only ever a run row's status while the web server works on it in the background.
+Status = Literal["PAID", "REJECTED", "NEEDS_HUMAN_REVIEW", "DUPLICATE", "ERROR", "PROCESSING"]
 DecidedBy = Literal["agents", "guardrail", "human", "system"]
 
 

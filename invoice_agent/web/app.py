@@ -1,37 +1,60 @@
 """The review screen: a server-rendered FastAPI app over the run history (queue, invoice detail, human decision).
 It sits at the end of the pipeline: a run paused in human_review is resumed here through runner.resume_review.
-Everything shown is translated into plain language for a PE analyst/VP: dollars, risks and reasons, never raw JSON.
+It is also an intake: uploaded files (or the whole sample set) run through the pipeline in background threads,
+and the detail page shows each run's stage live. Everything shown is translated into plain language for a PE analyst/VP: dollars, risks and reasons, never raw JSON.
 """
+import hashlib
 import logging
+import re
+import sqlite3
 import threading
+import uuid
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps
 from invoice_agent.infra import db
+from invoice_agent.infra.config import Settings
 from invoice_agent.infra.logging_setup import RUN_LOGGER
-from invoice_agent.models import Flag, PipelineState, Uncertainty
-from invoice_agent.runner import hydrate, resume_review
+from invoice_agent.models import FinalOutcome, Flag, PipelineState, Uncertainty
+from invoice_agent.runner import build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review
 from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON
+from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
 from invoice_agent.web.highlight import highlight
 from invoice_agent.web.security import ALLOWED_HOSTS, is_same_origin, needs_origin_check
 
 log = logging.getLogger(RUN_LOGGER)
 
 HERE = Path(__file__).parent
+# The sample invoices, found from this file (not the current directory) so the button works wherever the server starts.
+SAMPLES_DIR = HERE.parent.parent / "data" / "invoices"
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_TYPES_TEXT = "PDF, TXT, JSON, CSV or XML"
+INTERRUPTED_REASON = "Processing was interrupted — re-upload the file to try again."
 
 STATUS_LABELS = {
     "PAID": "Paid", "REJECTED": "Rejected", "NEEDS_HUMAN_REVIEW": "Needs your review",
-    "DUPLICATE": "Duplicate", "ERROR": "Error",
+    "DUPLICATE": "Duplicate", "ERROR": "Error", "PROCESSING": "Processing",
 }
+
+# The live tracker's steps, in plain language. A run's stored stage is the graph node that last finished.
+PROGRESS_STEPS = ["Reading file", "Extracting details (ingestion agent)", "Checking against inventory",
+                  "Analyst ⇄ VP review", "Decision"]
+# Finished node -> index of the step now in progress. Every node after approval (or a failure) is the decision.
+_STEP_AFTER_NODE = {"read": 1, "extract": 2, "validate": 3, "approval": 4, "mark_duplicate": 4, "guardrail": 4,
+                    "human_review": 4, "pay": 4, "log_rejection": 4, "fail": 4}
+# Stage set on files of a sample batch that haven't started yet.
+QUEUED = "queued"
 DECIDED_BY_LABELS = {
     "agents": "the analyst and VP agents", "guardrail": "the automatic safety check",
     "human": "a reviewer", "system": "the system",
@@ -165,6 +188,33 @@ def _first_sentence(text: str, width: int = 120) -> str:
     return line if len(line) <= width else line[: width - 1].rstrip() + "…"
 
 
+def current_step(stage: str | None) -> int:
+    """Index of the tracker step in progress for a stored stage; -1 while waiting its turn in a batch."""
+    if stage == QUEUED:
+        return -1
+    # No stage yet (or "started") means the job has just begun reading the file.
+    return _STEP_AFTER_NODE.get(stage or "", 0)
+
+
+def stage_label(stage: str | None) -> str:
+    """The plain-language name of what a PROCESSING run is doing now."""
+    step = current_step(stage)
+    return "Waiting its turn" if step < 0 else PROGRESS_STEPS[step]
+
+
+def display_name(row: dict) -> str:
+    """The file's name as the user uploaded it (without the run-id prefix uploads are saved with)."""
+    return Path(row["source_path"] or "").name.removeprefix(f"{row['run_id']}_")
+
+
+def safe_filename(name: str) -> str:
+    """Reduce an uploaded file name to [A-Za-z0-9._-], dropping any folders so it can't point outside uploads/."""
+    # Both separators: a Windows browser may send C:\path\file.txt.
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).lstrip(".")
+    return cleaned or "invoice"
+
+
 # ---------- view models ----------
 
 def verdict(state: PipelineState) -> str:
@@ -239,18 +289,30 @@ def queue_view(rows: list[dict]) -> dict:
         inv = state.get("invoice")
         currency = inv.currency if inv else "USD"
         status = row["status"] or "ERROR"
+        processing = status == "PROCESSING"
         # Dollar totals only add up USD invoices; a EUR amount summed as dollars would mislead.
         if status in totals and currency.upper() == "USD":
             totals[status] += _amount_of(row)
         review_count += status == "NEEDS_HUMAN_REVIEW"
         items.append({
             "run_id": row["run_id"], "status": status, "status_label": STATUS_LABELS.get(status, status),
-            "number": row["invoice_number"] or Path(row["source_path"] or "").name or row["run_id"],
+            "number": row["invoice_number"] or display_name(row) or row["run_id"],
             "vendor": row["vendor"] or "—", "amount": money(row["amount"], currency),
-            "why": why_line(state) if state.get("final") else "", "updated": nice_time(row["updated_at"]),
+            # A run in progress may still carry its previous result's state, so its "why" is the live stage.
+            "why": stage_label(row.get("stage")) if processing else why_line(state) if state.get("final") else "",
+            "updated": nice_time(row["updated_at"]), "processing": processing,
         })
     return {"rows": items, "paid": money(totals["PAID"]), "rejected": money(totals["REJECTED"]),
             "review_count": review_count, "review_amount": money(totals["NEEDS_HUMAN_REVIEW"])}
+
+
+def progress_view(row: dict) -> dict:
+    """The tracker page for a run still PROCESSING: file name and each step as done, current or still to come."""
+    step = current_step(row.get("stage"))
+    steps = [{"label": label, "state": "done" if i < step else "current" if i == step else "todo"}
+             for i, label in enumerate(PROGRESS_STEPS)]
+    return {"run_id": row["run_id"], "file_name": display_name(row), "steps": steps,
+            "label": stage_label(row.get("stage")), "started": nice_time(row["updated_at"])}
 
 
 def _worst_severity(flags: list[Flag]) -> str | None:
@@ -320,12 +382,13 @@ def detail_view(row: dict) -> dict:
     blocking = [{"title": FLAG_TITLES.get(f.code, f.code), "message": f.message}
                 for f in flags if f.severity == "must_reject"]
     raw_text = state.get("raw_text")
+    file_name = display_name({"run_id": row["run_id"], "source_path": state.get("source_path")})
     return {
         "run_id": row["run_id"], "status": final.status, "status_label": STATUS_LABELS.get(final.status, final.status),
-        "number": (inv.invoice_number if inv else None) or Path(state.get("source_path", "")).name,
+        "number": (inv.invoice_number if inv else None) or file_name,
         "vendor": (inv.vendor if inv else None) or "Unknown vendor",
         "amount": money(inv.total if inv else None, currency), "approve_amount": money(inv.total, currency) if inv else "",
-        "file_name": Path(state.get("source_path", "")).name,
+        "file_name": file_name,
         "invoice_date": nice_date(inv.date) if inv else "—", "due_date": nice_date(inv.due_date) if inv else "—",
         "verdict": verdict(state), "reasoning": final.reasoning, "decided_by": DECIDED_BY_LABELS[final.decided_by],
         "human_note": final.human_note, "paid": bool(final.payment_result), "duplicate_of": state.get("duplicate_of"),
@@ -339,10 +402,69 @@ def detail_view(row: dict) -> dict:
     }
 
 
+# ---------- background processing ----------
+
+def _save_error(conn: sqlite3.Connection, run_id: str, source_path: str | None, reason: str,
+                content_hash: str | None = None) -> None:
+    """End a run as ERROR with a plain reason (it never reached, or never finished, the pipeline)."""
+    state: PipelineState = {"run_id": run_id, "source_path": source_path or "",
+                            "final": FinalOutcome(status="ERROR", decided_by="system", reasoning=reason)}
+    # Keeping the hash lets a re-upload of the same file reuse this run instead of adding another row.
+    if content_hash:
+        state["content_hash"] = content_hash
+    db.save_run(conn, state)
+
+
+def _close_runtime(deps: Deps, graph) -> None:
+    """Close a background job's own database connections (run history and checkpoints)."""
+    deps.conn.close()
+    checkpoint_conn = getattr(getattr(graph, "checkpointer", None), "conn", None)
+    if isinstance(checkpoint_conn, sqlite3.Connection):
+        checkpoint_conn.close()
+
+
+def run_jobs(jobs: list[tuple[str, Path]], runtime_factory: Callable[[], tuple[Deps, object]], app_db: Path) -> None:
+    """Background job: run each (run_id, file) through the pipeline in order, on this thread's own runtime."""
+    try:
+        # Own runtime per job: a SQLite connection must never be shared between threads.
+        deps, graph = runtime_factory()
+    except Exception as exc:
+        # E.g. no API key: the runs can't start, so say why instead of leaving them PROCESSING forever.
+        log.warning("background job could not start", extra={"fields": {"error": str(exc)}})
+        conn = db.connect(app_db)
+        try:
+            for run_id, path in jobs:
+                _save_error(conn, run_id, str(path), f"Couldn't start processing: {exc}")
+        finally:
+            conn.close()
+        return
+    try:
+        for run_id, path in jobs:
+            try:
+                db.set_stage(deps.conn, run_id, "started")
+                state = process_file(path, deps, graph, run_id=run_id,
+                                     on_stage=lambda node, rid=run_id: db.set_stage(deps.conn, rid, node))
+                if state["run_id"] != run_id:
+                    # Two uploads of the same file raced; the other run holds the result.
+                    _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
+                                "being processed at the same time — open that one from the queue.")
+            except Exception as exc:
+                # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
+                log.exception("background run failed", extra={"fields": {"run_id": run_id}})
+                _save_error(deps.conn, run_id, str(path), f"Processing failed: {exc}")
+    finally:
+        _close_runtime(deps, graph)
+
+
 # ---------- app ----------
 
-def create_app(deps: Deps, graph, conn) -> FastAPI:
-    """Build the review-screen app over a runtime (real or fake deps/graph) and the app database connection."""
+def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
+               runtime_factory: Callable[[], tuple[Deps, object]] | None = None) -> FastAPI:
+    """Build the review-screen app over a runtime (real or fake deps/graph) and the app database connection.
+    settings: where uploads and the app db live; runtime_factory: builds a fresh runtime for each background job."""
+    settings = settings or Settings()
+    runtime_factory = runtime_factory or (lambda: build_runtime(settings))
+    uploads = settings.var_dir / "uploads"
     app = FastAPI(title="Invoice review", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
@@ -350,6 +472,33 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     # One decision at a time: two quick clicks must never resume (and pay) the same run twice.
     decision_lock = threading.Lock()
+    # One intake at a time, so two uploads of the same file can't both claim it as new.
+    intake_lock = threading.Lock()
+    # Every background job thread, so tests (and nothing else) can wait for them to finish.
+    app.state.jobs = []
+
+    # A run still PROCESSING at startup belonged to a server that was stopped mid-run: nothing will finish it.
+    for row in db.list_runs(conn):
+        if row["status"] == "PROCESSING":
+            _save_error(conn, row["run_id"], row["source_path"], INTERRUPTED_REASON, row["content_hash"])
+
+    def start_jobs(jobs: list[tuple[str, Path]]) -> None:
+        """Process (run_id, file) pairs one after another on a new daemon thread."""
+        thread = threading.Thread(target=run_jobs, args=(jobs, runtime_factory, settings.app_db), daemon=True)
+        app.state.jobs.append(thread)
+        thread.start()
+
+    def claim(content_hash: str) -> tuple[str, bool]:
+        """The run id for a file's contents and whether it needs processing (False: open the existing run instead)."""
+        existing = db.find_run_by_content_hash(conn, content_hash)
+        # Same re-run policy as the CLI: never re-run a paid, paused or human-decided invoice, or one in progress.
+        if existing and (existing["status"] == "PROCESSING" or keeps_result(existing)):
+            return existing["run_id"], False
+        return (existing["run_id"] if existing else uuid.uuid4().hex[:12]), True
+
+    def refuse(request: Request, status_code: int, title: str, message: str) -> HTMLResponse:
+        """A plain page explaining why an upload was refused."""
+        return render(request, "message.html", {"title": title, "message": message}, status_code)
 
     def render(request: Request, name: str, context: dict, status_code: int = 200) -> HTMLResponse:
         """Render a template with the request in context."""
@@ -357,6 +506,10 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
 
     def render_detail(request: Request, row: dict, status_code: int = 200, **extra) -> HTMLResponse:
         """Render the detail page for a run, with optional form error, notice and kept form values."""
+        if row["status"] == "PROCESSING":
+            # No result yet: show the live stage tracker instead.
+            return render(request, "processing.html", {"run": progress_view(row), "notice": extra.get("notice")},
+                          status_code)
         context = {"inv": detail_view(row), "error": None, "notice": None, "form": {}, **extra}
         return render(request, "detail.html", context, status_code)
 
@@ -381,12 +534,74 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
         return render(request, "queue.html", {"missing": False, **queue_view(db.list_runs(conn))})
 
     @app.get("/invoices/{run_id}", response_class=HTMLResponse)
-    def detail(request: Request, run_id: str, decided: int = 0):
+    def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0):
         """One invoice: verdict, source document, extracted fields, flags, agent reasoning, decision panel."""
         row = db.get_run(conn, run_id)
         if row is None:
             return not_found(request)
-        return render_detail(request, row, notice="Your decision has been recorded." if decided else None)
+        notice = "Your decision has been recorded." if decided else (
+            "This file was uploaded before, so here is that invoice — it wasn't processed or paid again."
+            if seen else None)
+        return render_detail(request, row, notice=notice)
+
+    @app.get("/invoices/{run_id}/status")
+    def status(run_id: str):
+        """Where a run is now, for live.js: status, last finished stage and, while processing, the step in progress."""
+        row = db.get_run(conn, run_id)
+        if row is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        processing = row["status"] == "PROCESSING"
+        return {"status": row["status"], "stage": row["stage"],
+                "step": current_step(row["stage"]) if processing else None,
+                "label": stage_label(row["stage"]) if processing else STATUS_LABELS.get(row["status"])}
+
+    @app.post("/upload", response_class=HTMLResponse)
+    def upload(request: Request, file: UploadFile | None = File(None)):
+        """Save an uploaded invoice, mark it PROCESSING, start it in the background and open its live page."""
+        if file is None or not file.filename:
+            return refuse(request, 400, "No file chosen", "Choose an invoice file to upload, then try again.")
+        name = safe_filename(file.filename)
+        if Path(name).suffix.lower() not in SUPPORTED_SUFFIXES:
+            return refuse(request, 400, "File type not supported",
+                          f"Upload a {ALLOWED_TYPES_TEXT} file. “{file.filename}” isn't one of those, "
+                          "so it wasn't processed.")
+        # Read one byte past the limit: enough to know it's too big without holding a huge file in memory.
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            return refuse(request, 413, "File too large",
+                          "Invoices can be up to 5 MB. This one is larger, so it wasn't processed.")
+        digest = hashlib.sha256(content).hexdigest()  # the same content hash the reader computes
+        with intake_lock:
+            run_id, needed = claim(digest)
+            if not needed:
+                return RedirectResponse(f"/invoices/{run_id}?seen=1", status_code=303)
+            dest = uploads / f"{run_id}_{name}"
+            # Defence in depth: the sanitized name can't contain a folder, but never write outside uploads/.
+            if dest.resolve().parent != uploads.resolve():
+                return refuse(request, 400, "File name not allowed", "Rename the file and try again.")
+            uploads.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+            db.create_pending_run(conn, run_id, str(dest), digest)
+        start_jobs([(run_id, dest)])
+        return RedirectResponse(f"/invoices/{run_id}", status_code=303)
+
+    @app.post("/process-samples")
+    def process_samples():
+        """Queue every sample invoice not already settled and process them one by one in the background."""
+        jobs = []
+        with intake_lock:
+            for path in invoice_files(SAMPLES_DIR):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                run_id, needed = claim(digest)
+                if not needed:
+                    continue
+                db.create_pending_run(conn, run_id, str(path), digest)
+                # Shown as "Waiting its turn" until the job reaches this file.
+                db.set_stage(conn, run_id, QUEUED)
+                jobs.append((run_id, path))
+        if jobs:
+            start_jobs(jobs)
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/invoices/{run_id}/decision", response_class=HTMLResponse)
     def decide(request: Request, run_id: str, decision: str = Form(""), note: str = Form(""),

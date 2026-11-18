@@ -1,4 +1,5 @@
-{#- The invoice queue: dollar exposure up top, then every processed invoice (awaiting review first). -#}
+{#- The invoice queue: dollar exposure and the intake (upload, process samples) up top, then every invoice:
+    in progress first (with its live stage), then awaiting review, then newest. -#}
 {% extends "base.html" %}
 {% block title %}Invoices{% endblock %}
 {% block content %}
@@ -13,8 +14,22 @@
     </ul>
     {% endif %}
   </div>
-  {#- Intake slot: Task 11b adds the upload drop zone and the "Process all sample invoices" button here. -#}
-  <div class="intake" id="intake"></div>
+  {#- Intake: a plain file input + submit works without JavaScript; live.js adds drag-and-drop. -#}
+  <div class="intake" id="intake">
+    <form class="dropzone" method="post" action="/upload" enctype="multipart/form-data" data-dropzone>
+      <label class="dz-label" for="upload-file">
+        <span class="dz-title">Upload an invoice</span>
+        <span class="hint">Drop a file here or choose one · PDF, TXT, JSON, CSV or XML · up to 5 MB</span>
+      </label>
+      <div class="dz-row">
+        <input id="upload-file" name="file" type="file" accept=".pdf,.txt,.json,.csv,.xml" required>
+        <button type="submit" class="btn btn-approve">Upload and process</button>
+      </div>
+    </form>
+    <form method="post" action="/process-samples" class="samples">
+      <button type="submit" class="btn btn-secondary">Process all sample invoices</button>
+    </form>
+  </div>
 </section>
 
 {% if missing %}
@@ -37,12 +52,12 @@
     </thead>
     <tbody>
       {% for r in rows %}
-      <tr class="row-{{ r.status | lower }}">
+      <tr class="row-{{ r.status | lower }}"{% if r.processing %} data-live-run="{{ r.run_id }}"{% endif %}>
         <td class="c-status"><span class="pill pill-{{ r.status | lower }}">{{ r.status_label }}</span></td>
         <td class="c-number"><a class="row-link" href="/invoices/{{ r.run_id }}">{{ r.number }}</a></td>
         <td class="c-vendor">{{ r.vendor }}</td>
         <td class="c-amount num">{{ r.amount }}</td>
-        <td class="c-why">{{ r.why }}</td>
+        <td class="c-why">{% if r.processing %}<span class="live-stage" data-live-label>{{ r.why }}</span>{% else %}{{ r.why }}{% endif %}</td>
         <td class="c-updated updated"><span class="sr-only">Updated </span>{{ r.updated }}</td>
       </tr>
       {% endfor %}
@@ -53,7 +68,8 @@
 <div class="empty">
   <h2>No invoices yet</h2>
   <p>Processed invoices show up here, with anything that needs your decision at the top.</p>
-  <p class="hint">To process the sample set, run <code>python main.py --invoice_dir=data/invoices</code>, then refresh.</p>
+  <p class="hint">Upload an invoice above, or press “Process all sample invoices” to run the sample set.</p>
 </div>
 {% endif %}
 {% endblock %}
+{% block scripts %}<script src="{{ url_for('static', path='live.js') }}" defer></script>{% endblock %}

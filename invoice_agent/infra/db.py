@@ -1,5 +1,5 @@
 """SQLite persistence: seeded inventory table plus run history (full state as JSON).
-Used by validate (stock/price/duplicate checks), pay, and the review screen.
+Used by validate (stock/price/duplicate checks), pay, and the review screen (which also tracks live run stages here).
 """
 import json
 import sqlite3
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS inventory (
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY, source_path TEXT, content_hash TEXT, invoice_number TEXT,
     vendor TEXT, fingerprint TEXT, status TEXT, amount TEXT,
-    created_at TEXT, updated_at TEXT, state_json TEXT
+    created_at TEXT, updated_at TEXT, state_json TEXT, stage TEXT
 );
 """
 
@@ -46,6 +46,10 @@ def connect(path: Path) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     """Create tables and seed inventory; safe to call repeatedly."""
     conn.executescript(SCHEMA)
+    # Migration: an app.db made before live progress existed has no stage column; add it, keeping every row.
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "stage" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN stage TEXT")
     # INSERT OR IGNORE keeps init idempotent and never resets stock that has changed since.
     conn.executemany("INSERT OR IGNORE INTO inventory (item, stock, unit_price) VALUES (?, ?, ?)", SEED_INVENTORY)
     conn.commit()
@@ -110,6 +114,30 @@ def save_run(conn: sqlite3.Connection, state: PipelineState) -> None:
     conn.commit()
 
 
+def create_pending_run(conn: sqlite3.Connection, run_id: str, source_path: str,
+                       content_hash: str | None = None) -> None:
+    """Mark a run PROCESSING before the pipeline starts, so the screen can show it straight away."""
+    now = _now()
+    # On a re-run of a known file the row already exists: keep its content_hash and created_at, reset the progress.
+    conn.execute(
+        """
+        INSERT INTO runs (run_id, source_path, content_hash, status, stage, created_at, updated_at, state_json)
+        VALUES (?, ?, ?, 'PROCESSING', NULL, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            source_path=excluded.source_path, content_hash=COALESCE(runs.content_hash, excluded.content_hash),
+            status='PROCESSING', stage=NULL, updated_at=excluded.updated_at
+        """,
+        (run_id, source_path, content_hash, now, now, json.dumps({"run_id": run_id, "source_path": source_path})),
+    )
+    conn.commit()
+
+
+def set_stage(conn: sqlite3.Connection, run_id: str, stage: str) -> None:
+    """Record the pipeline stage a run has reached (the graph node that just finished), for the live tracker."""
+    conn.execute("UPDATE runs SET stage = ? WHERE run_id = ?", (stage, run_id))
+    conn.commit()
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict:
     """Turn a runs row into a dict, decoding state_json into "state"."""
     out = dict(row)
@@ -124,9 +152,10 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
 
 
 def list_runs(conn: sqlite3.Connection) -> list[dict]:
-    """All runs, with those awaiting human review first, then newest."""
+    """All runs: in progress first, then those awaiting human review, then newest."""
     rows = conn.execute(
-        "SELECT * FROM runs ORDER BY (status = 'NEEDS_HUMAN_REVIEW') DESC, updated_at DESC"
+        "SELECT * FROM runs ORDER BY (status = 'PROCESSING') DESC, (status = 'NEEDS_HUMAN_REVIEW') DESC, "
+        "updated_at DESC"
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
 

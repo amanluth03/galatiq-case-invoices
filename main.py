@@ -83,7 +83,8 @@ def serve(port: int) -> int:
         return 2
     setup_logging(settings.log_dir)
     console.print(f"Review screen → http://localhost:{port}")
-    uvicorn.run(create_app(deps, graph, deps.conn), host="127.0.0.1", port=port)
+    # settings: uploads and every background job's own runtime use the same var/ files as the server.
+    uvicorn.run(create_app(deps, graph, deps.conn, settings=settings), host="127.0.0.1", port=port)
     return 0
 
 
