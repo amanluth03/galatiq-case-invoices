@@ -1,5 +1,5 @@
-"""Tests for uploading invoices and watching them run live: upload checks, background jobs, the /status endpoint,
-the "process all samples" button and startup recovery. Fake deps/graph stand in for Grok; jobs are joined to finish.
+"""Tests for uploading invoices and watching their story live: upload checks, background jobs, the /status endpoint,
+the "run all sample invoices" button and startup recovery. Fake deps/graph stand in for Grok; jobs are joined to finish.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -107,29 +107,42 @@ def test_status_of_unknown_run_is_404(conn, tmp_path):
     assert client.get("/invoices/nope/status").status_code == 404
 
 
-def test_processing_detail_shows_tracker(conn, tmp_path):
-    """A run still PROCESSING shows the plain-language stage tracker with the current step marked and a live region."""
+def test_running_story_is_live(conn, tmp_path):
+    """A run still PROCESSING shows its finished steps, the next one running, and polls via live.js."""
     client, _ = make_client(conn, tmp_path)
     db.create_pending_run(conn, "r1", "var/uploads/r1_invoice.txt")
-    db.set_stage(conn, "r1", "read")
+    db.save_progress(conn, "r1", "read", {"run_id": "r1", "raw_text": "line\nline", "format": "txt"})
     html = client.get("/invoices/r1").text
-    assert "Reading file" in html and "Checking against inventory" in html and "Analyst ⇄ VP review" in html
-    assert 'aria-current="step"' in html and 'aria-live="polite"' in html
-    # read has finished, so extraction is the step in progress.
-    assert html.index('aria-current="step"') > html.index("Reading file")
-    assert html.index('aria-current="step"') < html.index("Checking against inventory")
-    assert "live.js" in html and "invoice.txt" in html
+    assert 'data-live-run="r1"' in html and 'aria-live="polite"' in html and "live.js" in html
+    assert "Text invoice, 2 lines" in html and "Ingestion agent is reading it..." in html
+    assert "st-running" in html and ">Running<" in html and "invoice.txt" in html
 
 
-def test_queue_shows_processing_stage_and_intake(conn, tmp_path):
-    """The queue offers the upload form and samples button, and a PROCESSING row shows its current stage."""
+def test_main_page_offers_intake_and_lists_running_run(conn, tmp_path):
+    """The main page offers the upload form and samples button, and lists a PROCESSING run as Running."""
     client, _ = make_client(conn, tmp_path)
     db.create_pending_run(conn, "r1", "var/uploads/r1_invoice.txt")
     db.set_stage(conn, "r1", "extract")
     html = client.get("/").text
     assert 'action="/upload"' in html and 'enctype="multipart/form-data"' in html
-    assert "Process all sample invoices" in html
-    assert "Processing" in html and "Checking against inventory" in html
+    assert "Run all 20 sample invoices" in html
+    assert ">Running<" in html and "invoice.txt" in html
+
+
+def test_upload_redirects_to_its_story(conn, tmp_path):
+    """After an upload the browser lands on that invoice's story, which ends paid once the job is done."""
+    client, app = make_client(conn, tmp_path)
+    resp = upload(client, "invoice_1001.txt", (INVOICES / "invoice_1001.txt").read_bytes())
+    wait_for_jobs(app)
+    html = client.get(resp.headers["location"]).text
+    assert "invoice_1001.txt" in html and "7. Decision: Paid" in html and "data-live-run" not in html
+
+
+def test_progress_is_never_written_over_a_finished_run(conn):
+    """A late progress save leaves a finished run's result alone."""
+    db.save_run(conn, {"run_id": "r1", "final": FinalOutcome(status="PAID", decided_by="agents", reasoning="ok")})
+    db.save_progress(conn, "r1", "read", {"run_id": "r1"})
+    assert db.get_run(conn, "r1")["state"]["final"]["status"] == "PAID"
 
 
 def test_cross_origin_upload_is_403(conn, tmp_path):
@@ -152,7 +165,7 @@ def test_reupload_of_paid_file_opens_existing_run(conn, tmp_path):
 
 
 def test_process_samples_runs_every_sample(conn, tmp_path):
-    """The samples button 303s to the queue and processes every supported file in data/invoices, none left PROCESSING."""
+    """The samples button 303s to the main page and processes every supported file in data/invoices, none left PROCESSING."""
     client, app = make_client(conn, tmp_path)
     resp = client.post("/process-samples")
     assert resp.status_code == 303 and resp.headers["location"] == "/"

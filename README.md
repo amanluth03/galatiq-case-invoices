@@ -8,9 +8,9 @@ The system takes an invoice in whatever shape it arrives (PDF, text, JSON, CSV, 
 
 Acme loses about **$2M/year** to manual invoice handling: a **30% error rate** and **5-day delays**.
 
-- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **18 were settled with written reasons in about 5 minutes and 2 were held for a person** (6 paid, 9 rejected by rules, 2 to a person, 3 duplicates).
-- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time: **9 of the 20 samples are blocked this way**, **2 more go to a person** because their prices or currency differ from Acme's records, and **3 are recognized as the same invoice sent twice**, so they are never paid twice.
-- **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an invoice's prices, totals or currency differ from Acme's reference (a rush fee, a discount, a foreign currency), whatever the agents decided. The reviewer sees the original document with the uncertain spots highlighted, the agents' argument, and a plain verdict, not logs.
+- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the measured run of the 20 sample files, **all 20 were settled with written reasons in about 5 minutes** (6 paid, 9 rejected by rules, 2 rejected by the agents, 3 duplicates).
+- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time: **9 of the 20 samples are blocked this way**, 2 more (1010 and 1014) have prices or currency that differ from Acme's records, and **3 are recognized as the same invoice sent twice**, so they are never paid twice.
+- **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an invoice's prices, totals or currency differ from Acme's reference (a rush fee, a discount, a foreign currency), whatever the agents decided. Under the current rule, 1010 and 1014 are therefore held for a person by code whatever the agents decide (added after the measured run, in which the agents rejected both). The reviewer follows the invoice's story step by step: what was read, what the checks found, the agents' argument and why it stopped, with the original document one click away.
 - **Every decision is auditable.** Reasoning, flags, the full analyst ⇄ VP exchange and the deciding party are stored per invoice.
 
 ## Quick start
@@ -26,9 +26,9 @@ Requires Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and an xAI API key.
 That's it. The script:
 1. creates a Python environment in `.venv` and installs everything (first run only, about a minute),
 2. asks for your xAI API key if `.env` doesn't have one yet (saved to `.env`, which git ignores),
-3. starts the review screen with an empty queue (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
+3. starts the review screen empty (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
 
-Once it's open, click **Process all sample invoices** to watch all 20 samples go through live (about 5 minutes, 5 at a time), or drop any file from `data/invoices/` into the upload area to follow a single invoice (about 20 seconds). Then open any invoice in the queue to see the original document, the flags, the analyst and VP's back-and-forth, and the decision.
+Once it's open, drop a file from `data/invoices/` on the drop zone (or choose one) and press **Process this invoice**: its story fills in step by step as it happens (about 20 seconds). Try `invoice_1010.txt` to see a person step in. **Run all 20 sample invoices** processes the whole set (about 5 minutes, 5 at a time); every invoice appears in the **Invoices** list beside the story, and clicking one shows its story.
 
 | Variation | What it does |
 |---|---|
@@ -52,11 +52,11 @@ cp .env.example .env             # only if ./start hasn't created it; put your k
 | `python main.py --reset` | Wipe run history, results and checkpoints (inventory is re-seeded) for a clean demo; combine with the other flags |
 | `python main.py --serve` | Start the review screen at **http://127.0.0.1:8000** |
 
-The review screen lets you upload invoices or **process all samples** with one click, watch each invoice move through the stages live, work the **review queue** (needs-review items on top, dollar exposure summarized), open an invoice to see the original document beside the extracted fields, and **approve or reject** with a note. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
+The review screen is one page that tells each invoice's story. Drop in a file (or run all the samples) and watch its 7 steps appear as they happen: **read the file**, **the ingestion agent read it** (vendor, total, items, due date and anything it was unsure about, with the original document one click away), **checked against inventory and rules** (each finding marked blocking, needs a look or FYI), **the analyst agent** (its recommendation and reasoning, and what it is looking up while it works), **the VP agent** (agrees, or sends it back for another round), **the guardrail** (which hard rule, if any, decides) and **the decision** (paid, rejected, duplicate, error, or **waiting for you**, with Approve and Reject right there). The **Invoices** list beside it shows every invoice with its status and amount. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
 
 Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history), `var/checkpoints.db` (paused runs), `var/logs/run.jsonl` (one structured JSON line per pipeline stage). The model is set by `XAI_MODEL` (default `grok-4-1-fast-non-reasoning`); `BATCH_WORKERS` (default 5, `1` = one at a time) sets how many invoices a batch runs at once.
 
-**Batches.** A folder run (and the screen's "process all samples") works on 5 invoices at once, each worker on its own database connections and checkpointer; the per-invoice pipeline is unchanged. The duplicate check is the only step that looks across invoices, so it is atomic: the lookup and the recording of the invoice's number and fingerprint happen under one lock, and of two copies exactly one is the original (which copy that is can differ between runs). Any run that ended ERROR because Grok timed out, dropped the connection or returned a 5xx is retried once, one at a time, after the batch; the CLI says how many were.
+**Batches.** A folder run (and the screen's "Run all 20 sample invoices") works on 5 invoices at once, each worker on its own database connections and checkpointer; the per-invoice pipeline is unchanged. The duplicate check is the only step that looks across invoices, so it is atomic: the lookup and the recording of the invoice's number and fingerprint happen under one lock, and of two copies exactly one is the original (which copy that is can differ between runs). Any run that ended ERROR because Grok timed out, dropped the connection or returned a 5xx is retried once, one at a time, after the batch; the CLI says how many were.
 
 ## Architecture
 
@@ -146,7 +146,7 @@ AI is used only where judgment is needed: reading messy documents, and weighing 
 | `invoice_agent/agents/` | Everything that calls Grok: `ingestion/`, `analyst/`, `vp/` (prompt + agent each), `approval/` (loop, policy, tools, briefing), `llm.py` |
 | `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `payments.py` |
 | `invoice_agent/infra/` | `config.py` (settings and business knobs), `db.py` (SQLite inventory + run history), `logging_setup.py` |
-| `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs), `security.py`, `highlight.py`, `templates/`, `static/` |
+| `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs and their live progress), `story.py` (the 7-step invoice story, one builder for live and finished invoices), `security.py`, `highlight.py`, `templates/`, `static/` |
 | `tests/` | Mirrors the package; offline tests use scripted fake agents |
 
 ## The rulebook
@@ -163,7 +163,9 @@ Reference stock and prices (seed data, extended with a `unit_price` column): Wid
 
 ## Results on the sample invoices
 
-Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-17): **6 PAID, 9 rejected by rules, 2 waiting for a person, 3 DUPLICATE, 0 ERROR.**
+Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-17): **6 PAID, 11 REJECTED (9 by rules, 2 by the agents), 3 DUPLICATE, 0 ERROR.**
+
+> **Since this run:** an invoice whose prices, totals or currency differ from Acme's records now goes to a person by code, whatever the agents decide. So 1010 and 1014, which the agents rejected in this run, are now held as NEEDS_HUMAN_REVIEW. This is verified live on 1014 (and on 1010 through the review screen); the offline tests cover both. The table below shows what was measured.
 
 | File | Vendor | Amount | Outcome | Why |
 |---|---|---|---|---|
@@ -177,18 +179,18 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 | invoice_1007.csv | MegaWidgets Corp | $15,525.00 | REJECTED | WidgetA and WidgetB exceed stock (rule); printed total kept as printed, its under-billing flagged |
 | invoice_1008.txt | NoProd Industries | $9,900.00 | REJECTED | SuperGizmo / MegaSprocket not in inventory (rule, enforced by the guardrail) |
 | invoice_1009.json | (missing) | −$250.00 | REJECTED | Missing vendor, negative quantity and total (rule) |
-| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | NEEDS_HUMAN_REVIEW | WidgetA at $300 vs $250 reference, rush fee: a person decides |
+| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | REJECTED (agents) | WidgetA at $300 vs $250 reference, rush fee. Now held for a person (see note above) |
 | invoice_1011.pdf | Summit Manufacturing Co. | $3,000.00 | PAID | Clean |
 | invoice_1011.txt | Summit Manufacturing Co. | $3,000.00 | DUPLICATE | Same invoice as the PDF |
 | invoice_1012.pdf | QuickShip Distributers | $9,975.00 | PAID | Clean (vendor-rename note is information only) |
 | invoice_1012.txt | QuickShip Distributers | $9,975.00 | DUPLICATE | Same invoice as the PDF |
 | invoice_1013.json | Atlas Industrial Supply | $22,562.80 | REJECTED | 22 WidgetA, 18 WidgetB, 9 GadgetX exceed stock, and the total is $50 more than its lines + tax (rule) |
 | invoice_1013.pdf | Atlas Industrial Supply | $22,562.80 | DUPLICATE | Same invoice as the JSON |
-| invoice_1014.xml | TechParts International | $4,125.00 | NEEDS_HUMAN_REVIEW | EUR invoice at non-reference prices; can't be verified against USD reference: a person decides |
+| invoice_1014.xml | TechParts International | $4,125.00 | REJECTED (agents) | EUR invoice at non-reference prices; can't be verified against USD reference. Now held for a person (see note above) |
 | invoice_1015.csv | Reliable Components Inc. | $6,500.00 | PAID | Clean |
 | invoice_1016.json | Widgets Inc. | $3,233.00 | REJECTED | WidgetC not in inventory (rule) |
 
-**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **about 5 minutes with 5 workers** on this run, with no Grok timeouts. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't. Invoices 1010 and 1014 are held for a person whatever the agents recommend.
+**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **about 5 minutes with 5 workers** on this run, with no Grok timeouts. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't. Under the current rule, invoices 1010 and 1014 are held for a person whatever the agents recommend.
 
 ## Human in the loop
 
@@ -197,11 +199,11 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 - An invoice's price, total or currency differs from Acme's records (and no hard rule is broken), whether the agents recommended APPROVE or REJECT.
 - An amount isn't printed anywhere on the invoice.
 
-**What the reviewer sees and does.** The original document with the uncertain spots highlighted, the flags, and the agents' argument (with their recommendation). They approve or reject, with a note. Approving over a hard rule needs a written justification. The human decision is final.
+**What the reviewer sees and does.** The invoice's story ends at "Waiting for you": what the ingestion agent read (the original document with the uncertain spots highlighted is one click away), what the checks found, each round of the analyst and VP's argument, why the guardrail sent it to a person, and the agents' recommendation. They approve (which pays the shown amount) or reject, with a note, right in that step. Approving over a hard rule needs a written justification. The human decision is final.
 
 **How it works.** The graph pauses at a LangGraph `interrupt` and its state is saved in a SQLite checkpointer; the run resumes from the review screen when the reviewer answers. The CLI never blocks: a paused invoice ends the run as `NEEDS_HUMAN_REVIEW`.
 
-**Try it.** Run `./start`, then drop `data/invoices/invoice_1010.txt` (a rush fee changes the price) or `data/invoices/invoice_1014.xml` (billed in EUR) into the upload area. Watch it stop at the person step, then approve or reject it.
+**Try it.** Run `./start`, then drop `data/invoices/invoice_1010.txt` (a rush fee changes the price) or `data/invoices/invoice_1014.xml` (billed in EUR) on the drop zone and press **Process this invoice**. Watch the story stop at "Waiting for you", then approve or reject it.
 
 ## Safety and design decisions
 
@@ -218,7 +220,7 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 ## Testing
 
 ```bash
-.venv/bin/pytest                      # offline suite: 235 tests, ~7 s, no network (scripted fake agents)
+.venv/bin/pytest                      # offline suite: 254 tests, ~7 s, no network (scripted fake agents)
 .venv/bin/pytest -m live -v -s        # live tests against real Grok (reads XAI_API_KEY from .env)
 timeout 900 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s    # all 20 samples end to end, 5 at a time
 ```

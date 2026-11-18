@@ -1,5 +1,5 @@
 """SQLite persistence: seeded inventory table plus run history (full state as JSON).
-Used by validate (stock/price/duplicate checks), pay, and the review screen (which also tracks live run stages here).
+Used by validate (stock/price/duplicate checks), pay, and the review screen (which also keeps each running run's stage and partial state here, to tell its story live).
 """
 import json
 import shutil
@@ -170,6 +170,16 @@ def record_identity(conn: sqlite3.Connection, run_id: str, source_path: str, con
 def set_stage(conn: sqlite3.Connection, run_id: str, stage: str) -> None:
     """Record the pipeline stage a run has reached (the graph node that just finished), for the live tracker."""
     conn.execute("UPDATE runs SET stage = ? WHERE run_id = ?", (stage, run_id))
+    conn.commit()
+
+
+def save_progress(conn: sqlite3.Connection, run_id: str, stage: str | None, partial_state: dict) -> None:
+    """Store a running run's partial state (and its new stage, if given) so the screen can tell its story live."""
+    # Only while PROCESSING: a late progress write must never overwrite a finished run's saved result.
+    conn.execute(
+        "UPDATE runs SET stage = COALESCE(?, stage), state_json = ? WHERE run_id = ? AND status = 'PROCESSING'",
+        (stage, json.dumps(_jsonable(partial_state)), run_id),
+    )
     conn.commit()
 
 

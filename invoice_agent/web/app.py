@@ -1,7 +1,8 @@
-"""The review screen: a server-rendered FastAPI app over the run history (queue, invoice detail, human decision).
-It sits at the end of the pipeline: a run paused in human_review is resumed here through runner.resume_review.
-It is also an intake: uploaded files (or the whole sample set) run through the pipeline in background threads,
-and the detail page shows each run's stage live. Everything shown is translated into plain language for a PE analyst/VP: dollars, risks and reasons, never raw JSON.
+"""The review screen: one page that tells each invoice's story as it moves through the pipeline
+(read -> extract -> validate -> analyst/VP approval -> guardrail -> pay / reject / waiting for you).
+Drop in a file (or run the whole sample set) and it runs in a background thread; every step appears as soon as it
+happens, and a run paused for a person is approved or rejected right in its story (resumed via runner.resume_review).
+Everything shown is plain language for a PE analyst/VP: dollars, risks and reasons, never codes or raw JSON.
 """
 import hashlib
 import logging
@@ -10,8 +11,6 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
@@ -20,19 +19,21 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps
 from invoice_agent.infra import db
 from invoice_agent.infra.config import Settings
 from invoice_agent.infra.logging_setup import RUN_LOGGER
-from invoice_agent.models import FinalOutcome, Flag, PipelineState, Uncertainty
+from invoice_agent.models import FinalOutcome, PipelineState, Round, Uncertainty
 from invoice_agent.runner import (
     _paid_checkpoint, build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
 )
-from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
 from invoice_agent.web.highlight import highlight
 from invoice_agent.web.security import ALLOWED_HOSTS, is_same_origin, needs_origin_check
+from invoice_agent.web.story import (
+    NOT_STARTED, QUEUED, STATUS_LABELS, blocking_summary, build_story, display_name, lookup_text, money,
+    plain_message, story_json,
+)
 
 log = logging.getLogger(RUN_LOGGER)
 
@@ -47,166 +48,8 @@ MAX_STEM_CHARS = 100
 ALLOWED_TYPES_TEXT = "PDF, TXT, JSON, CSV or XML"
 TOO_LARGE_MESSAGE = "Invoices can be up to 5 MB. This one is larger, so it wasn't processed."
 INTERRUPTED_REASON = "Processing was interrupted: re-upload the file to try again."
-
-STATUS_LABELS = {
-    "PAID": "Paid", "REJECTED": "Rejected", "NEEDS_HUMAN_REVIEW": "Needs your review",
-    "DUPLICATE": "Duplicate", "ERROR": "Error", "PROCESSING": "Processing",
-}
-
-# The live tracker's steps, in plain language. A run's stored stage is the graph node that last finished.
-PROGRESS_STEPS = ["Reading file", "Extracting details (ingestion agent)", "Checking against inventory",
-                  "Analyst ⇄ VP review", "Decision"]
-# Finished node -> index of the step now in progress. Every node after approval (or a failure) is the decision.
-_STEP_AFTER_NODE = {"read": 1, "extract": 2, "validate": 3, "approval": 4, "mark_duplicate": 4, "guardrail": 4,
-                    "human_review": 4, "pay": 4, "log_rejection": 4, "fail": 4}
-# Stage set on files of a sample batch that haven't started yet.
-QUEUED = "queued"
-DECIDED_BY_LABELS = {
-    "agents": "the analyst and VP agents", "guardrail": "the automatic safety check",
-    "human": "a reviewer", "system": "the system",
-}
-SEVERITY_GROUPS = [
-    ("must_reject", "Blocking", "Any one of these stops payment."),
-    ("needs_scrutiny", "Needs a look", "Allowed only with a clear explanation."),
-    ("info", "FYI", "Context: not decisive on its own."),
-]
-CONFIDENCE_LABELS = {"high": "Confident", "medium": "Somewhat sure", "low": "Unsure"}
-CHECKLIST_LABELS = {
-    "vendor_history": "Vendor history", "price_check": "Prices vs. our records", "stock_check": "Stock on hand",
-    "arithmetic": "Math reconciles", "payment_terms": "Payment terms",
-}
-
-# Short plain-language titles for each validation flag code (the codes themselves never reach the screen).
-FLAG_TITLES = {
-    "unknown_item": "Item not in inventory", "zero_stock_item": "Item has zero stock",
-    "exceeds_stock": "More than we have in stock", "non_positive_quantity": "Zero or negative quantity",
-    "missing_quantity": "Quantity missing", "negative_total": "Negative total", "missing_vendor": "Vendor missing",
-    "missing_total": "Total missing", "no_line_items": "No line items",
-    "total_exceeds_line_items": "Total is more than the lines add up to",
-    "line_total_exceeds_price": "Line total is more than qty × price", "total_unverifiable": "Total can't be verified",
-    "invoice_number_reused": "Invoice number already billed", "price_mismatch": "Price differs from our records",
-    "arithmetic_mismatch": "Numbers don't reconcile", "over_10k": "Over $10,000: extra checks required",
-    "due_date_missing": "Due date missing", "due_before_or_on_invoice_date": "Due on or before the invoice date",
-    "non_usd_currency": "Not in US dollars", "missing_unit_price": "Unit price missing",
-    "amount_not_in_source": "Amount not found on the invoice",
-    "extraction_issue": "The reader was unsure", "urgency_language": "Payment-pressure language",
-    "vendor_name_change": "Vendor name changed",
-}
-
-# Blocking reasons phrased for a sentence like "Blocked: 2 items aren't in inventory".
-# A pair is (singular, plural) and gets a count; a plain string is a one-off fact.
-_BLOCKING_PHRASES: dict[str, tuple[str, str] | str] = {
-    "unknown_item": ("item isn't in inventory", "items aren't in inventory"),
-    "zero_stock_item": ("item has zero stock", "items have zero stock"),
-    "exceeds_stock": ("item is ordered beyond stock on hand", "items are ordered beyond stock on hand"),
-    "non_positive_quantity": ("line has a zero or negative quantity", "lines have a zero or negative quantity"),
-    "missing_quantity": ("line has no quantity", "lines have no quantity"),
-    "line_total_exceeds_price": ("line is billed above qty × price", "lines are billed above qty × price"),
-    "negative_total": "the total is negative",
-    "missing_vendor": "no vendor is named",
-    "missing_total": "no total is stated",
-    "no_line_items": "there are no line items",
-    "total_exceeds_line_items": "the total is more than the line items add up to",
-    "total_unverifiable": "the total can't be verified",
-    "invoice_number_reused": "this invoice number was already billed with different contents",
-}
-
-# Invoice header fields shown in the extracted-fields table, in reading order.
-_FIELDS = [
-    ("invoice_number", "Invoice number", "text"), ("vendor", "Vendor", "text"), ("date", "Invoice date", "date"),
-    ("due_date", "Due date", "date"), ("payment_terms", "Payment terms", "text"), ("currency", "Currency", "text"),
-    ("subtotal", "Subtotal", "money"), ("tax", "Tax", "money"), ("shipping", "Shipping", "money"),
-    ("total", "Total", "money"), ("notes", "Notes", "text"),
-]
-
-
-# ---------- formatting ----------
-
-def money(value, currency: str = "USD") -> str:
-    """Format an amount as $1,234.56 (or "1,234.56 EUR" for other currencies); a dash when unknown."""
-    if value is None or value == "":
-        return "n/a"
-    try:
-        d = Decimal(str(value))
-    except InvalidOperation:
-        return str(value)
-    sign = "−" if d < 0 else ""
-    body = f"{abs(d):,.2f}"
-    return f"{sign}${body}" if currency.upper() == "USD" else f"{sign}{body} {currency.upper()}"
-
-
-def quantity(value) -> str:
-    """Format a quantity without trailing zeros (10, not 10.00)."""
-    if value is None:
-        return "n/a"
-    return f"{Decimal(value).normalize():,f}"
-
-
-def nice_date(value) -> str:
-    """Format a date as 15 Jan 2026; a dash when unknown."""
-    # value.day instead of %-d: the no-padding flag is not portable (it fails on Windows).
-    return f"{value.day} {value.strftime('%b %Y')}" if isinstance(value, date) else "n/a"
-
-
-def nice_time(iso: str | None) -> str:
-    """Format a stored ISO timestamp as "17 Nov, 14:32 UTC" for the queue (times are stored in UTC)."""
-    if not iso:
-        return "n/a"
-    t = datetime.fromisoformat(iso)
-    return f"{t.day} {t.strftime('%b, %H:%M')} UTC"
-
-
-def _plural(n: int, pair: tuple[str, str]) -> str:
-    """'1 item isn't…' or '3 items aren't…'."""
-    return f"{n} {pair[0] if n == 1 else pair[1]}"
-
-
-def _join(parts: list[str]) -> str:
-    """Join phrases as 'a', 'a and b' or 'a, b and c'."""
-    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
-
-
-def blocking_summary(flags: list[Flag]) -> str | None:
-    """One plain sentence fragment for all must_reject flags (e.g. "2 items aren't in inventory"), or None."""
-    counts: dict[str, int] = {}
-    others: list[str] = []
-    for f in flags:
-        if f.severity != "must_reject":
-            continue
-        if f.code in _BLOCKING_PHRASES:
-            counts[f.code] = counts.get(f.code, 0) + 1
-        else:
-            others.append(f.message)
-    parts = []
-    for code, n in counts.items():
-        phrase = _BLOCKING_PHRASES[code]
-        parts.append(_plural(n, phrase) if isinstance(phrase, tuple) else phrase)
-    parts += others
-    return _join(parts) if parts else None
-
-
-def _first_sentence(text: str, width: int = 120) -> str:
-    """The first sentence of a reasoning text on one line, cut to width."""
-    line = " ".join((text or "").split())
-    for stop in (". ", "; "):
-        if stop in line:
-            line = line.split(stop, 1)[0] + ("." if stop == ". " else "")
-            break
-    return line if len(line) <= width else line[: width - 1].rstrip() + "…"
-
-
-def current_step(stage: str | None) -> int:
-    """Index of the tracker step in progress for a stored stage; -1 while waiting its turn in a batch."""
-    if stage == QUEUED:
-        return -1
-    # No stage yet (or "started") means the job has just begun reading the file.
-    return _STEP_AFTER_NODE.get(stage or "", 0)
-
-
-def stage_label(stage: str | None) -> str:
-    """The plain-language name of what a PROCESSING run is doing now."""
-    step = current_step(stage)
-    return "Waiting its turn" if step < 0 else PROGRESS_STEPS[step]
+# How many tool lookups a running agent shows at once (the latest ones).
+MAX_LOOKUPS = 6
 
 
 def _declared_length(request: Request) -> int:
@@ -215,11 +58,6 @@ def _declared_length(request: Request) -> int:
         return int(request.headers.get("content-length", "0"))
     except ValueError:
         return 0
-
-
-def display_name(row: dict) -> str:
-    """The file's name as the user uploaded it (without the run-id prefix uploads are saved with)."""
-    return Path(row["source_path"] or "").name.removeprefix(f"{row['run_id']}_")
 
 
 def safe_filename(name: str) -> str:
@@ -241,188 +79,79 @@ def safe_filename(name: str) -> str:
 
 # ---------- view models ----------
 
-def verdict(state: PipelineState) -> str:
-    """The detail page's top sentence: what happened to this invoice, in plain English."""
-    final, flags, approval = state["final"], state.get("flags", []), state.get("approval")
-    blocked = blocking_summary(flags)
-    if final.status == "NEEDS_HUMAN_REVIEW":
-        # The money-difference hold overwrites approval.reasoning with a fixed sentence; show it as is.
-        if final.reasoning.startswith(HUMAN_REVIEW_REASON.split("{")[0]):
-            return final.reasoning
-        rounds = len(approval.rounds) if approval else 0
-        return f"Agents couldn't agree after {rounds} round{'s' if rounds != 1 else ''}: your call"
-    if final.status == "REJECTED":
-        if final.decided_by == "human":
-            return "Rejected by a reviewer"
-        return f"Rejected: {blocked}" if blocked else "Rejected by the agents"
-    if final.status == "PAID":
-        inv = state.get("invoice")
-        who = "after a reviewer approved it" if final.decided_by == "human" else ", approved by the agents"
-        to = f" to {inv.vendor}" if inv and inv.vendor else ""
-        amount = money(inv.total, inv.currency) if inv else ""
-        return f"Paid {amount}{to} {who}"
-    if final.status == "DUPLICATE":
-        return "Duplicate: this invoice was already processed, so it wasn't paid again"
-    return "We couldn't process this file"
+def row_state(row: dict) -> PipelineState:
+    """A run row's stored state as typed models, including the live analyst/VP rounds of a running run."""
+    state = hydrate(row["state"])
+    if state.get("live_rounds"):
+        state["live_rounds"] = [Round.model_validate(r) for r in state["live_rounds"]]
+    return state
 
 
-def why_line(state: PipelineState) -> str:
-    """The queue's one-line "why" for a run."""
-    final = state["final"]
-    if final.status == "NEEDS_HUMAN_REVIEW":
-        return verdict(state)
-    if final.status == "REJECTED" and final.decided_by != "human":
-        blocked = blocking_summary(state.get("flags", []))
-        if blocked:
-            return f"Blocked: {blocked}"
-    if final.status == "DUPLICATE":
-        return "Already processed: not paid twice"
-    if final.status == "ERROR":
-        # No raw text means the read step itself failed; otherwise a later stage (extraction, agents) did.
-        prefix = "Processing failed: " if state.get("raw_text") else "Couldn't read this file: "
-        return prefix + _first_sentence(final.reasoning, 80)
-    if final.decided_by == "human":
-        return ("Approved by a reviewer: " if final.status == "PAID" else "Rejected by a reviewer: ") + \
-            _first_sentence(final.reasoning, 90)
-    return _first_sentence(final.reasoning)
+def row_status(row: dict) -> str:
+    """A run row's status for the screen (ERROR when a row somehow has none)."""
+    return row["status"] or "ERROR"
+
+
+def run_story(conn: sqlite3.Connection, row: dict):
+    """Build the story of one run row (live while PROCESSING), looking up the original's file name for a duplicate."""
+    state = row_state(row)
+    live = row_status(row) == "PROCESSING"
+    original = None
+    if state.get("duplicate_of"):
+        other = db.get_run(conn, state["duplicate_of"])
+        original = display_name(other["run_id"], other["source_path"]) if other else None
+    return build_story(state, row.get("stage"), live, original_name=original, decided_at=row.get("updated_at"))
+
+
+def status_label(row: dict) -> str:
+    """The pill text for a run: Paid, Rejected, Waiting for you, Duplicate, Error, Running or Queued."""
+    if row_status(row) == "PROCESSING" and row.get("stage") == QUEUED:
+        return "Queued"
+    return STATUS_LABELS.get(row_status(row), row_status(row))
+
+
+def list_view(rows: list[dict], selected: str | None) -> list[dict]:
+    """The compact "Invoices" list: file name, status pill and amount for every run."""
+    items = []
+    for row in rows:
+        inv = row_state(row).get("invoice")
+        items.append({
+            "run_id": row["run_id"], "name": display_name(row["run_id"], row["source_path"]) or row["run_id"],
+            "status": row_status(row).lower(), "label": status_label(row),
+            "amount": money(row["amount"], inv.currency if inv else "USD") if row["amount"] else "",
+            "selected": row["run_id"] == selected,
+        })
+    return items
 
 
 def _humanize_reason(u: Uncertainty) -> str:
-    """Turn an uncertainty's reason into reviewer-friendly words."""
+    """Turn an uncertainty's reason into reviewer-friendly words, for the highlight tooltips."""
     if u.reason.startswith("ingestion agent confidence"):
         return "The reader wasn't fully sure of this value." if u.confidence == "medium" else \
             "The reader was unsure of this value."
     return u.reason[0].upper() + u.reason[1:] if u.reason else ""
 
 
-def _amount_of(row: dict) -> Decimal:
-    """A run row's total as a Decimal (0 when unknown) for the queue's dollar totals."""
-    try:
-        return Decimal(row["amount"]) if row.get("amount") else Decimal(0)
-    except InvalidOperation:
-        return Decimal(0)
-
-
-def queue_view(rows: list[dict]) -> dict:
-    """Rows and dollar totals for the queue page."""
-    totals = {"PAID": Decimal(0), "REJECTED": Decimal(0), "NEEDS_HUMAN_REVIEW": Decimal(0)}
-    review_count = 0
-    items = []
-    for row in rows:
-        state = hydrate(row["state"])
-        inv = state.get("invoice")
-        currency = inv.currency if inv else "USD"
-        status = row["status"] or "ERROR"
-        processing = status == "PROCESSING"
-        # Dollar totals only add up USD invoices; a EUR amount summed as dollars would mislead.
-        if status in totals and currency.upper() == "USD":
-            totals[status] += _amount_of(row)
-        review_count += status == "NEEDS_HUMAN_REVIEW"
-        items.append({
-            "run_id": row["run_id"], "status": status, "status_label": STATUS_LABELS.get(status, status),
-            "number": row["invoice_number"] or display_name(row) or row["run_id"],
-            "vendor": row["vendor"] or "n/a", "amount": money(row["amount"], currency),
-            # A run in progress may still carry its previous result's state, so its "why" is the live stage.
-            "why": stage_label(row.get("stage")) if processing else why_line(state) if state.get("final") else "",
-            "updated": nice_time(row["updated_at"]), "processing": processing,
-        })
-    return {"rows": items, "paid": money(totals["PAID"]), "rejected": money(totals["REJECTED"]),
-            "review_count": review_count, "review_amount": money(totals["NEEDS_HUMAN_REVIEW"])}
-
-
-def progress_view(row: dict) -> dict:
-    """The tracker page for a run still PROCESSING: file name and each step as done, current or still to come."""
-    step = current_step(row.get("stage"))
-    steps = [{"label": label, "state": "done" if i < step else "current" if i == step else "todo"}
-             for i, label in enumerate(PROGRESS_STEPS)]
-    return {"run_id": row["run_id"], "file_name": display_name(row), "steps": steps,
-            "label": stage_label(row.get("stage")), "started": nice_time(row["updated_at"])}
-
-
-def _worst_severity(flags: list[Flag]) -> str | None:
-    """The most serious severity among flags, for tinting a line item row."""
-    for sev, _, _ in SEVERITY_GROUPS:
-        if any(f.severity == sev for f in flags):
-            return sev
-    return None
-
-
-def detail_view(row: dict) -> dict:
-    """Everything the detail page shows for one run, already formatted for display."""
-    state = hydrate(row["state"])
-    final, inv, approval = state["final"], state.get("invoice"), state.get("approval")
-    flags, uncs = state.get("flags", []), state.get("uncertainties", [])
-    currency = inv.currency if inv else "USD"
-    by_path = {u.field_path: u for u in uncs}
-
-    def unc_view(path: str) -> dict | None:
-        """The uncertainty on a field, formatted, or None if the reader was confident."""
-        u = by_path.get(path)
-        if u is None:
-            return None
-        return {"confidence": u.confidence, "label": CONFIDENCE_LABELS[u.confidence], "raw": u.raw,
-                "reason": _humanize_reason(u)}
-
-    fields = []
-    for key, label, kind in _FIELDS:
-        value = getattr(inv, key, None) if inv else None
-        if key in ("shipping", "notes") and value is None and key not in by_path:
-            continue  # optional fields most invoices don't have: hide rather than show a row of dashes
-        shown = money(value, currency) if kind == "money" else nice_date(value) if kind == "date" else (value or "n/a")
-        fields.append({"label": label, "value": shown, "money": kind == "money", "unc": unc_view(key)})
-
-    lines = []
-    for i, it in enumerate(inv.items if inv else []):
-        line_flags = [f for f in flags if (f.field_path or "").startswith(f"items[{i}]")]
-        lines.append({
-            "name": it.name_raw, "sku": it.sku if it.sku and it.sku != it.name_raw else None,
-            "suggestion": it.sku_suggestion, "qty": quantity(it.qty), "unit_price": money(it.unit_price, currency),
-            "line_total": money(it.line_total, currency), "note": it.note, "severity": _worst_severity(line_flags),
-            "unc": {k: unc_view(f"items[{i}].{k}") for k in ("name", "qty", "unit_price", "line_total")},
-        })
-
-    groups = []
-    for sev, title, hint in SEVERITY_GROUPS:
-        members = [{"title": FLAG_TITLES.get(f.code, f.code.replace("_", " ").capitalize()), "message": f.message}
-                   for f in flags if f.severity == sev]
-        if members:
-            groups.append({"severity": sev, "title": title, "hint": hint, "flags": members})
-
-    rounds, checklist = [], None
-    for r in (approval.rounds if approval else []):
-        rec, rev = r.recommendation, r.review
-        rounds.append({
-            "number": r.number, "decision": rec.decision, "reasoning": rec.reasoning, "evidence": rec.evidence,
-            "review": None if rev is None else {
-                "accepted": rev.verdict == "ACCEPT", "final_decision": rev.final_decision,
-                "reasoning": rev.reasoning, "feedback": rev.feedback,
-            },
-        })
-        if rec.checklist:
-            # The latest round's checklist is the one the VP judged.
-            checklist = [{"label": CHECKLIST_LABELS[k], "answer": (rec.checklist.get(k) or "").strip()}
-                         for k in CHECKLIST_KEYS]
-
-    blocking = [{"title": FLAG_TITLES.get(f.code, f.code), "message": f.message}
-                for f in flags if f.severity == "must_reject"]
-    raw_text = state.get("raw_text")
-    file_name = display_name({"run_id": row["run_id"], "source_path": state.get("source_path")})
+def story_view(conn: sqlite3.Connection, row: dict) -> dict:
+    """Everything the story section shows for one run: header, the 7 steps, the original document and the panel."""
+    state = row_state(row)
+    live = row_status(row) == "PROCESSING"
+    inv, flags = state.get("invoice"), state.get("flags") or []
+    raw_text = None if live and row.get("stage") in NOT_STARTED else state.get("raw_text")
+    uncs = state.get("uncertainties") or []
     return {
-        "run_id": row["run_id"], "status": final.status, "status_label": STATUS_LABELS.get(final.status, final.status),
-        "number": (inv.invoice_number if inv else None) or file_name,
-        "vendor": (inv.vendor if inv else None) or "Unknown vendor",
-        "amount": money(inv.total if inv else None, currency), "approve_amount": money(inv.total, currency) if inv else "",
-        "file_name": file_name,
-        "invoice_date": nice_date(inv.date) if inv else "n/a", "due_date": nice_date(inv.due_date) if inv else "n/a",
-        "verdict": verdict(state), "reasoning": final.reasoning, "decided_by": DECIDED_BY_LABELS[final.decided_by],
-        "human_note": final.human_note, "paid": bool(final.payment_result), "duplicate_of": state.get("duplicate_of"),
-        "fields": fields, "lines": lines, "flag_groups": groups, "blocking": blocking,
-        "blocking_summary": blocking_summary(flags), "uncertain_count": len(uncs),
-        # Tooltips on the highlights get the same plain-language reasons as the fields table.
+        "run_id": row["run_id"], "live": live, "status": row_status(row).lower(), "label": status_label(row),
+        "file_name": display_name(row["run_id"], row["source_path"]) or row["run_id"],
+        "steps": run_story(conn, row),
+        # Tooltips on the highlights get the same plain-language reasons as the story's "unsure about".
         "source": highlight(raw_text, [u.model_copy(update={"reason": _humanize_reason(u)}) for u in uncs])
         if raw_text else None,
-        "checklist": checklist, "open_questions": approval.open_questions if approval else [], "rounds": rounds,
-        "awaiting": final.status == "NEEDS_HUMAN_REVIEW",
+        "uncertain_count": len(uncs),
+        "awaiting": row_status(row) == "NEEDS_HUMAN_REVIEW",
+        "vendor": (inv.vendor if inv else None) or "the vendor",
+        "approve_amount": money(inv.total, inv.currency) if inv else "",
+        "blocking": [plain_message(f.message) for f in flags if f.severity == "must_reject"],
+        "blocking_summary": blocking_summary(flags),
     }
 
 
@@ -440,17 +169,55 @@ def _save_error(conn: sqlite3.Connection, run_id: str, source_path: str | None, 
     return state
 
 
+def _tool_lookups(update: dict) -> list[str]:
+    """Plain sentences for the tool calls in an agent's model step (e.g. "Looked up WidgetA stock and price")."""
+    out = []
+    for message in update.get("messages") or []:
+        for call in getattr(message, "tool_calls", None) or []:
+            text = lookup_text(call.get("name", ""), call.get("args") or {})
+            if text:
+                out.append(text)
+    return out
+
+
+def progress_recorder(conn: sqlite3.Connection, run_id: str) -> Callable[[tuple, str, dict], None]:
+    """An on_update callback for process_file that keeps this run's partial state in its row as each node finishes,
+    so the story (and its analyst/VP rounds and tool lookups) can be shown live."""
+    # Built only from this run's own updates, so a re-run never shows the previous result's details.
+    partial: dict = {"run_id": run_id}
+
+    def on_update(namespace: tuple, node: str, update: dict) -> None:
+        """Merge one node's output into the partial state and save it."""
+        if not namespace:
+            # A top-level pipeline node (read, extract, validate, approval, ...): its update is part of the state.
+            partial.update(update)
+            partial.pop("live_lookups", None)
+            db.save_progress(conn, run_id, node, partial)
+        elif len(namespace) == 1 and node in ("analyst", "vp"):
+            # Inside the approval loop: the rounds so far (each analyst recommendation, then the VP's review).
+            partial["live_rounds"] = update.get("rounds") or []
+            partial["live_lookups"] = []
+            db.save_progress(conn, run_id, None, partial)
+        elif len(namespace) > 1:
+            # Inside an agent's own tool loop: show what it is looking up.
+            lookups = _tool_lookups(update)
+            if lookups:
+                partial["live_lookups"] = [*(partial.get("live_lookups") or []), *lookups][-MAX_LOOKUPS:]
+                db.save_progress(conn, run_id, None, partial)
+
+    return on_update
+
+
 def _run_job(job: tuple[str, Path, str], deps: Deps, graph) -> PipelineState:
-    """Process one (run_id, file, content hash) job on a worker's runtime, reporting each stage for the live tracker."""
+    """Process one (run_id, file, content hash) job on a worker's runtime, saving its progress for the live story."""
     run_id, path, digest = job
     try:
         db.set_stage(deps.conn, run_id, "started")
-        state = process_file(path, deps, graph, run_id=run_id,
-                             on_stage=lambda node: db.set_stage(deps.conn, run_id, node))
+        state = process_file(path, deps, graph, run_id=run_id, on_update=progress_recorder(deps.conn, run_id))
         if state["run_id"] != run_id:
             # Two uploads of the same file raced; the other run holds the result.
             return _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
-                               "being processed at the same time: open that one from the queue.", digest)
+                               "being processed at the same time: open that one from the Invoices list.", digest)
         return state
     except Exception as exc:
         # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
@@ -537,18 +304,19 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         """Render a template with the request in context."""
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
-    def render_detail(request: Request, row: dict, status_code: int = 200, **extra) -> HTMLResponse:
-        """Render the detail page for a run, with optional form error, notice and kept form values."""
-        if row["status"] == "PROCESSING":
-            # No result yet: show the live stage tracker instead.
-            return render(request, "processing.html", {"run": progress_view(row), "notice": extra.get("notice")},
-                          status_code)
-        context = {"inv": detail_view(row), "error": None, "notice": None, "form": {}, **extra}
-        return render(request, "detail.html", context, status_code)
+    def render_page(request: Request, conn: sqlite3.Connection, row: dict | None, status_code: int = 200,
+                    **extra) -> HTMLResponse:
+        """The one page: drop zone, the story of `row` (or the empty state) and the Invoices list beside it."""
+        rows = db.list_runs(conn)
+        context = {"story": story_view(conn, row) if row else None,
+                   "runs": list_view(rows, row["run_id"] if row else None),
+                   "sample_count": len(invoice_files(SAMPLES_DIR)),
+                   "error": None, "notice": None, "missing": False, "form": {}, **extra}
+        return render(request, "story.html", context, status_code)
 
     def not_found(request: Request, conn: sqlite3.Connection) -> HTMLResponse:
-        """A friendly 404 page for an unknown run id."""
-        return render(request, "queue.html", {"missing": True, **queue_view(db.list_runs(conn))}, 404)
+        """A friendly 404: the main page with a notice that the invoice wasn't found."""
+        return render_page(request, conn, None, 404, missing=True)
 
     @app.middleware("http")
     async def same_origin_only(request: Request, call_next):
@@ -566,14 +334,15 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
-    def queue(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
-        """The invoice queue: dollar totals, then every run with those awaiting review first."""
-        return render(request, "queue.html", {"missing": False, **queue_view(db.list_runs(conn))})
+    def home(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
+        """The main page, showing the story of the invoice that matters most now (running, then waiting, then newest)."""
+        rows = db.list_runs(conn)
+        return render_page(request, conn, rows[0] if rows else None)
 
     @app.get("/invoices/{run_id}", response_class=HTMLResponse)
     def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0,
                conn: sqlite3.Connection = Depends(request_conn)):
-        """One invoice: verdict, source document, extracted fields, flags, agent reasoning, decision panel."""
+        """The main page showing one invoice's story (live while it runs)."""
         row = db.get_run(conn, run_id)
         if row is None:
             return not_found(request, conn)
@@ -584,23 +353,23 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
             notice = "This file is already being processed: here is its progress."
         elif seen:
             notice = "This file was uploaded before, so here is that invoice: it wasn't processed or paid again."
-        return render_detail(request, row, notice=notice)
+        return render_page(request, conn, row, notice=notice)
 
     @app.get("/invoices/{run_id}/status")
     def status(run_id: str, conn: sqlite3.Connection = Depends(request_conn)):
-        """Where a run is now, for live.js: status, last finished stage and, while processing, the step in progress."""
+        """The run's story as JSON for live.js: status, pill label, whether it has finished, and the 7 steps."""
         row = db.get_run(conn, run_id)
         if row is None:
             return JSONResponse({"error": "not found"}, status_code=404)
-        processing = row["status"] == "PROCESSING"
-        return {"status": row["status"], "stage": row["stage"],
-                "step": current_step(row["stage"]) if processing else None,
-                "label": stage_label(row["stage"]) if processing else STATUS_LABELS.get(row["status"])}
+        return {"status": row_status(row), "stage": row["stage"], "label": status_label(row),
+                "finished": row_status(row) != "PROCESSING",
+                "file_name": display_name(row["run_id"], row["source_path"]),
+                "steps": story_json(run_story(conn, row))}
 
     @app.post("/upload", response_class=HTMLResponse)
     def upload(request: Request, file: UploadFile | None = File(None),
                conn: sqlite3.Connection = Depends(request_conn)):
-        """Save an uploaded invoice, mark it PROCESSING, start it in the background and open its live page."""
+        """Save an uploaded invoice, mark it PROCESSING, start it in the background and open its live story."""
         if file is None or not file.filename:
             return refuse(request, 400, "No file chosen", "Choose an invoice file to upload, then try again.")
         name = safe_filename(file.filename)
@@ -641,7 +410,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 if not needed:
                     continue
                 db.create_pending_run(conn, run_id, str(path), digest)
-                # Shown as "Waiting its turn" until the job reaches this file.
+                # Shown as "Queued" until the job reaches this file.
                 db.set_stage(conn, run_id, QUEUED)
                 jobs.append((run_id, path, digest))
         if jobs:
@@ -651,7 +420,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
     @app.post("/invoices/{run_id}/decision", response_class=HTMLResponse)
     def decide(request: Request, run_id: str, decision: str = Form(""), note: str = Form(""),
                justification: str = Form(""), conn: sqlite3.Connection = Depends(request_conn)):
-        """Apply a reviewer's Approve/Reject to a paused run, then redirect back to its detail page."""
+        """Apply a reviewer's Approve/Reject to a paused run, then redirect back to its story."""
         form = {"note": note, "justification": justification}
         with decision_lock:
             row = db.get_run(conn, run_id)
@@ -659,21 +428,21 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 return not_found(request, conn)
             if row["status"] != "NEEDS_HUMAN_REVIEW":
                 label = STATUS_LABELS.get(row["status"], row["status"]).lower()
-                return render_detail(request, row, 409,
+                return render_page(request, conn, row, 409,
                                      notice=f"This invoice isn't waiting for a decision: it's already {label}.")
             if decision not in ("APPROVE", "REJECT"):
-                return render_detail(request, row, 400, error="Choose Approve or Reject.", form=form)
+                return render_page(request, conn, row, 400, error="Choose Approve or Reject.", form=form)
             has_blocking = any(f.get("severity") == "must_reject" for f in row["state"].get("flags", []))
             message = ("A justification is required to approve over blocking issues: "
                        "write why paying is right despite them. It goes on the audit record.")
             if decision == "APPROVE" and has_blocking and not justification.strip():
-                return render_detail(request, row, 400, error=message, form=form)
+                return render_page(request, conn, row, 400, error=message, form=form)
             # A crash after paying but before saving leaves the row paused while the checkpoint says PAID:
             # record that result and show it, never resume (and pay) the run a second time.
             paid = _paid_checkpoint(graph, run_id)
             if paid is not None:
                 db.save_run(deps.conn, paid)
-                return render_detail(request, db.get_run(conn, run_id) or row, 409,
+                return render_page(request, conn, db.get_run(conn, run_id) or row, 409,
                                      notice="This invoice had already been paid, so it wasn't paid again.")
             try:
                 # deps.conn (not this request's connection): the graph's own writes go through it, one decision at a time.
@@ -682,13 +451,13 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 # Defence in depth: the graph's own resume schema also refuses an unjustified approval.
                 if "justification required" not in str(exc):
                     raise
-                return render_detail(request, row, 400, error=message, form=form)
+                return render_page(request, conn, row, 400, error=message, form=form)
             except Exception:
                 # E.g. a missing or corrupt checkpoint: log the detail, show the reviewer a plain notice.
                 log.exception("decision failed", extra={"fields": {"run_id": run_id}})
-                return render_detail(request, db.get_run(conn, run_id) or row, 500, form=form, notice=(
+                return render_page(request, conn, db.get_run(conn, run_id) or row, 500, form=form, notice=(
                     "We couldn't record that decision: the run's saved progress is missing or damaged. "
-                    "Check the queue before trying again."))
+                    "Check the Invoices list before trying again."))
         return RedirectResponse(f"/invoices/{run_id}?decided=1", status_code=303)
 
     return app
