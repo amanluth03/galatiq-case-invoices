@@ -2,7 +2,7 @@
 """
 import pytest
 
-from invoice_agent.ingest.extract import EXTRACTION_PROMPT, ExtractionFailed, run_extraction
+from invoice_agent.agents.extractor.agent import EXTRACTION_PROMPT, ExtractionFailed, run_extraction
 from tests.fakes import ScriptedExtractor, make_extracted
 
 SKUS = ["WidgetA", "WidgetB", "GadgetX"]

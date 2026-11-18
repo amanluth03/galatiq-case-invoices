@@ -7,9 +7,9 @@ from decimal import Decimal, InvalidOperation
 
 from langchain_core.tools import BaseTool, tool
 
-from invoice_agent import db
-from invoice_agent.approval.policy import APPROVAL_POLICY
-from invoice_agent.ingest.normalize import normalize_invoice_number
+from invoice_agent.infra import db
+from invoice_agent.agents.approval.policy import APPROVAL_POLICY
+from invoice_agent.utils.normalize import normalize_invoice_number
 
 ANALYST_TOOLS = ["get_inventory", "get_invoice_history", "get_approval_policy", "calculate"]
 # VP gets no history tool on purpose: missing evidence goes back to the analyst.

@@ -7,8 +7,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from invoice_agent.approval.policy import checklist_complete, missing_checklist_keys
-from invoice_agent.config import MAX_ROUNDS, SCRUTINY_THRESHOLD
+from invoice_agent.agents.approval.policy import checklist_complete, missing_checklist_keys
+from invoice_agent.infra.config import MAX_ROUNDS, SCRUTINY_THRESHOLD
 from invoice_agent.models import (
     ApprovalOutcome, Flag, Invoice, Recommendation, Round, Uncertainty, VPReview,
 )

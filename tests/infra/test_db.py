@@ -2,8 +2,8 @@
 """
 from decimal import Decimal
 
-from invoice_agent import db
-from invoice_agent.config import Settings
+from invoice_agent.infra import db
+from invoice_agent.infra.config import Settings
 from invoice_agent.models import FinalOutcome, Invoice
 
 

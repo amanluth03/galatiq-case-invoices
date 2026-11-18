@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from invoice_agent.ingest.reader import UnsupportedFormatError, read_file
+from invoice_agent.utils.reader import UnsupportedFormatError, read_file
 
 INVOICES = Path("data/invoices")
 

@@ -2,7 +2,7 @@
 """
 from decimal import Decimal as D
 
-from invoice_agent.arithmetic import reconcile
+from invoice_agent.utils.arithmetic import reconcile
 from invoice_agent.models import Invoice, LineItem
 
 

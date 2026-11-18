@@ -26,8 +26,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 
-[tool.setuptools]
-packages = ["invoice_agent", "invoice_agent.ingest", "invoice_agent.validation", "invoice_agent.approval"]
+[tool.setuptools.packages.find]
+include = ["invoice_agent*"]
 
 [tool.pytest.ini_options]
 markers = ["live: calls the real xAI API"]

@@ -5,9 +5,9 @@ import re
 import sqlite3
 from decimal import Decimal
 
-from invoice_agent.arithmetic import reconcile
-from invoice_agent.config import SCRUTINY_THRESHOLD
-from invoice_agent.db import get_inventory
+from invoice_agent.utils.arithmetic import reconcile
+from invoice_agent.infra.config import SCRUTINY_THRESHOLD
+from invoice_agent.infra.db import get_inventory
 from invoice_agent.models import Flag, Invoice
 
 

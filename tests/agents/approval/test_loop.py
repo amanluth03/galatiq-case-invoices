@@ -1,8 +1,8 @@
 """Tests for the analyst/VP critique-loop subgraph, driven by scripted fake agents."""
 from decimal import Decimal
 
-from invoice_agent.approval.policy import APPROVAL_POLICY, CHECKLIST_KEYS
-from invoice_agent.approval.subgraph import ApprovalContext, build_approval_graph
+from invoice_agent.agents.approval.policy import APPROVAL_POLICY, CHECKLIST_KEYS
+from invoice_agent.agents.approval.loop import ApprovalContext, build_approval_graph
 from invoice_agent.models import Invoice
 from tests.fakes import ScriptedAnalyst, ScriptedVP, make_recommendation, make_review
 

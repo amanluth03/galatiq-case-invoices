@@ -4,10 +4,10 @@ from decimal import Decimal as D
 
 import pytest
 
-from invoice_agent.db import connect, init_db, save_run
+from invoice_agent.infra.db import connect, init_db, save_run
 from invoice_agent.models import Invoice, LineItem
-from invoice_agent.validation.checks import check_dates
-from invoice_agent.validation.validate import find_duplicate, fingerprint, run_validation
+from invoice_agent.utils.validation.checks import check_dates
+from invoice_agent.utils.validation.validate import find_duplicate, fingerprint, run_validation
 
 
 @pytest.fixture

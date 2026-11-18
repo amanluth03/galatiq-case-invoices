@@ -5,31 +5,14 @@ from typing import Callable
 
 from pydantic import BaseModel
 
-from invoice_agent.arithmetic import reconcile
-from invoice_agent.config import MAX_EXTRACTION_RETRIES
-from invoice_agent.ingest.normalize import to_invoice
+from invoice_agent.utils.arithmetic import reconcile
+from invoice_agent.agents.extractor.prompt import EXTRACTION_PROMPT  # noqa: F401  (re-exported for callers and tests)
+from invoice_agent.infra.config import MAX_EXTRACTION_RETRIES
+from invoice_agent.utils.normalize import to_invoice
 from invoice_agent.models import ExtractedInvoice, Invoice, Uncertainty
 
 # (raw_text, errors_from_previous_attempt) -> structured extraction.
 Extractor = Callable[[str, list[str]], ExtractedInvoice]
-
-EXTRACTION_PROMPT = """You extract structured data from an invoice's raw text.
-
-Map whatever labels the document uses onto the schema fields, e.g.
-"Vndr" / "FROM" -> vendor, "Inv #" / "INV NO" -> invoice_number, "Itms" / "Description" -> items.
-
-For every field return:
-- value: the field as you best read it. You may correct obvious OCR-style typos (2O26 -> 2026, $3,500.O0 -> 3500.00).
-- raw: the exact snippet of source text the value came from.
-- confidence: "high", "medium" or "low".
-  * Any correction of the source text must be "medium" or "low", never "high".
-  * Anything inferred rather than read (e.g. a due date computed from "Net 30") must be "low".
-
-If a field is genuinely absent, return null for it. Never invent values.
-
-Put descriptors like "(rush order)" in the item note, not the name.
-If you are given errors from a previous attempt, re-read the text and fix those specific problems.
-"""
 
 
 class ExtractionFailed(RuntimeError):

@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from invoice_agent.config import load_settings
+from invoice_agent.infra.config import load_settings
 from invoice_agent.models import Invoice, VPReview
 
 

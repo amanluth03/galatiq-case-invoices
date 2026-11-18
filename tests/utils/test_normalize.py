@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from invoice_agent.ingest.normalize import (
+from invoice_agent.utils.normalize import (
     match_sku,
     normalize_currency,
     normalize_invoice_number,

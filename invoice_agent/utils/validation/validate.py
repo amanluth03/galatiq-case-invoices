@@ -8,9 +8,9 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from invoice_agent.db import find_runs_by_invoice_number
+from invoice_agent.infra.db import find_runs_by_invoice_number
 from invoice_agent.models import Flag, Invoice
-from invoice_agent.validation import checks
+from invoice_agent.utils.validation import checks
 
 _CENT = Decimal("0.01")
 
