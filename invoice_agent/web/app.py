@@ -26,7 +26,9 @@ from invoice_agent.infra import db
 from invoice_agent.infra.config import Settings
 from invoice_agent.infra.logging_setup import RUN_LOGGER
 from invoice_agent.models import FinalOutcome, Flag, PipelineState, Uncertainty
-from invoice_agent.runner import build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review
+from invoice_agent.runner import (
+    build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
+)
 from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
 from invoice_agent.web.highlight import highlight
@@ -426,56 +428,52 @@ def detail_view(row: dict) -> dict:
 # ---------- background processing ----------
 
 def _save_error(conn: sqlite3.Connection, run_id: str, source_path: str | None, reason: str,
-                content_hash: str | None = None) -> None:
-    """End a run as ERROR with a plain reason (it never reached, or never finished, the pipeline)."""
+                content_hash: str | None = None) -> PipelineState:
+    """End a run as ERROR with a plain reason (it never reached, or never finished, the pipeline); returns that state."""
     state: PipelineState = {"run_id": run_id, "source_path": source_path or "",
                             "final": FinalOutcome(status="ERROR", decided_by="system", reasoning=reason)}
     # Keeping the hash lets a re-upload of the same file reuse this run instead of adding another row.
     if content_hash:
         state["content_hash"] = content_hash
     db.save_run(conn, state)
+    return state
 
 
-def _close_runtime(deps: Deps, graph) -> None:
-    """Close a background job's own database connections (run history and checkpoints)."""
-    deps.conn.close()
-    checkpoint_conn = getattr(getattr(graph, "checkpointer", None), "conn", None)
-    if isinstance(checkpoint_conn, sqlite3.Connection):
-        checkpoint_conn.close()
+def _run_job(job: tuple[str, Path, str], deps: Deps, graph) -> PipelineState:
+    """Process one (run_id, file, content hash) job on a worker's runtime, reporting each stage for the live tracker."""
+    run_id, path, digest = job
+    try:
+        db.set_stage(deps.conn, run_id, "started")
+        state = process_file(path, deps, graph, run_id=run_id,
+                             on_stage=lambda node: db.set_stage(deps.conn, run_id, node))
+        if state["run_id"] != run_id:
+            # Two uploads of the same file raced; the other run holds the result.
+            return _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
+                               "being processed at the same time — open that one from the queue.", digest)
+        return state
+    except Exception as exc:
+        # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
+        log.exception("background run failed", extra={"fields": {"run_id": run_id}})
+        return _save_error(deps.conn, run_id, str(path), f"Processing failed: {exc}", digest)
 
 
 def run_jobs(jobs: list[tuple[str, Path, str]], runtime_factory: Callable[[], tuple[Deps, object]],
-             app_db: Path) -> None:
-    """Background job: run each (run_id, file, content hash) through the pipeline in order, on this thread's own runtime."""
+             app_db: Path, workers: int = 1) -> None:
+    """Background job: run each (run_id, file, content hash) through the pipeline, `workers` at a time.
+    Same parallel path as the CLI batch: every worker has its own runtime, and Grok timeouts are retried once."""
     try:
-        # Own runtime per job: a SQLite connection must never be shared between threads.
-        deps, graph = runtime_factory()
+        run_batch(jobs, _run_job, runtime_factory, workers)
     except Exception as exc:
-        # E.g. no API key: the runs can't start, so say why instead of leaving them PROCESSING forever.
+        # E.g. no API key: the runtime can't be built, so say why instead of leaving runs PROCESSING forever.
         log.warning("background job could not start", extra={"fields": {"error": str(exc)}})
         conn = db.connect(app_db)
         try:
             for run_id, path, digest in jobs:
-                _save_error(conn, run_id, str(path), f"Couldn't start processing: {exc}", digest)
+                row = db.get_run(conn, run_id)
+                if row is None or row["status"] == "PROCESSING":
+                    _save_error(conn, run_id, str(path), f"Couldn't start processing: {exc}", digest)
         finally:
             conn.close()
-        return
-    try:
-        for run_id, path, digest in jobs:
-            try:
-                db.set_stage(deps.conn, run_id, "started")
-                state = process_file(path, deps, graph, run_id=run_id,
-                                     on_stage=lambda node, rid=run_id: db.set_stage(deps.conn, rid, node))
-                if state["run_id"] != run_id:
-                    # Two uploads of the same file raced; the other run holds the result.
-                    _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
-                                "being processed at the same time — open that one from the queue.", digest)
-            except Exception as exc:
-                # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
-                log.exception("background run failed", extra={"fields": {"run_id": run_id}})
-                _save_error(deps.conn, run_id, str(path), f"Processing failed: {exc}", digest)
-    finally:
-        _close_runtime(deps, graph)
 
 
 # ---------- app ----------
@@ -504,9 +502,9 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if row["status"] == "PROCESSING":
             _save_error(conn, row["run_id"], row["source_path"], INTERRUPTED_REASON, row["content_hash"])
 
-    def start_jobs(jobs: list[tuple[str, Path, str]]) -> None:
-        """Process (run_id, file, content hash) jobs one after another on a new daemon thread."""
-        thread = threading.Thread(target=run_jobs, args=(jobs, runtime_factory, settings.app_db), daemon=True)
+    def start_jobs(jobs: list[tuple[str, Path, str]], workers: int = 1) -> None:
+        """Process (run_id, file, content hash) jobs, `workers` at a time, from a new daemon thread."""
+        thread = threading.Thread(target=run_jobs, args=(jobs, runtime_factory, settings.app_db, workers), daemon=True)
         # Drop finished threads so a long-running server doesn't keep one per upload forever.
         app.state.jobs = [t for t in app.state.jobs if t.is_alive()] + [thread]
         thread.start()
@@ -620,7 +618,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
 
     @app.post("/process-samples")
     def process_samples():
-        """Queue every sample invoice not already settled and process them one by one in the background."""
+        """Queue every sample invoice not already settled and process them in the background, several at a time."""
         jobs = []
         with intake_lock:
             for path in invoice_files(SAMPLES_DIR):
@@ -633,7 +631,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 db.set_stage(conn, run_id, QUEUED)
                 jobs.append((run_id, path, digest))
         if jobs:
-            start_jobs(jobs)
+            start_jobs(jobs, settings.batch_workers)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/invoices/{run_id}/decision", response_class=HTMLResponse)

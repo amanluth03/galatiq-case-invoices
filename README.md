@@ -26,13 +26,15 @@ cp .env.example .env                                  # then put your key in XAI
 | Command | What it does |
 |---|---|
 | `python main.py --invoice_path=data/invoices/invoice_1001.txt` | Process one invoice; prints invoice, vendor, amount, outcome, why, decided by |
-| `python main.py --invoice_dir=data/invoices` | Process every file in a folder (in filename order); prints a summary table |
+| `python main.py --invoice_dir=data/invoices` | Process every file in a folder, 5 at a time (`BATCH_WORKERS`); prints a summary table in filename order |
 | `python main.py --reset` | Wipe run history, results and checkpoints (inventory is re-seeded) for a clean demo; combine with the other flags |
 | `python main.py --serve` | Start the review screen at **http://127.0.0.1:8000** |
 
 The review screen lets you upload invoices or **process all samples** with one click, watch each invoice move through the stages live, work the **review queue** (needs-review items on top, dollar exposure summarized), open an invoice to see the original document beside the extracted fields, and **approve or reject** with a note. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
 
-Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history), `var/checkpoints.db` (paused runs), `var/logs/run.jsonl` (one structured JSON line per pipeline stage). The model is set by `XAI_MODEL` (default `grok-4-1-fast-non-reasoning`).
+Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history), `var/checkpoints.db` (paused runs), `var/logs/run.jsonl` (one structured JSON line per pipeline stage). The model is set by `XAI_MODEL` (default `grok-4-1-fast-non-reasoning`); `BATCH_WORKERS` (default 5, `1` = one at a time) sets how many invoices a batch runs at once.
+
+**Batches.** A folder run (and the screen's "process all samples") works on 5 invoices at once, each worker on its own database connections and checkpointer; the per-invoice pipeline is unchanged. The duplicate check is the only step that looks across invoices, so it is atomic: the lookup and the recording of the invoice's number and fingerprint happen under one lock, and of two copies exactly one is the original (which copy that is can differ between runs). Any run that ended ERROR because Grok timed out, dropped the connection or returned a 5xx is retried once, one at a time, after the batch; the CLI says how many were.
 
 ## Architecture
 
@@ -89,7 +91,7 @@ Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history
 |---|---|
 | `main.py` | CLI entry point (`--invoice_path`, `--invoice_dir`, `--reset`, `--serve`) |
 | `invoice_agent/graph.py` | The LangGraph pipeline: stages, routing, guardrail, human-review interrupt, pay / log |
-| `invoice_agent/runner.py` | Runs files through the graph, re-run policy, saving results, resuming reviews |
+| `invoice_agent/runner.py` | Runs files through the graph (batches in parallel, timeout retry), re-run policy, saving results, resuming reviews |
 | `invoice_agent/models.py` | Shared Pydantic models and graph state |
 | `invoice_agent/agents/` | Everything that calls Grok: `ingestion/`, `analyst/`, `vp/` (prompt + agent each), `approval/` (loop, policy, tools, briefing), `llm.py` |
 | `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `payments.py` |
@@ -111,28 +113,53 @@ Reference stock and prices (seed data, extended with a `unit_price` column): Wid
 
 ## Results on the sample invoices
 
-RESULTS_PLACEHOLDER
+Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-18):
+
+| File | Vendor | Amount | Outcome | Why |
+|---|---|---|---|---|
+| invoice_1001.txt | Widgets Inc. | $5,000.00 | PAID | Clean: stock, prices and math all check out |
+| invoice_1002.txt | Gadgets Co. | $15,000.00 | REJECTED | 20 GadgetX ordered, 5 in stock |
+| invoice_1003.txt | Fraudster LLC | $100,000.00 | REJECTED | FakeItem: zero-stock / suspicious item |
+| invoice_1004.json | Precision Parts Ltd. | $1,890.00 | PAID | Clean original of INV-1004 |
+| invoice_1004_revised.json | Precision Parts Ltd. | $5,940.00 | REJECTED | INV-1004 reused with different contents (possible double-billing) |
+| invoice_1005.json | Global Supply Chain Partners | $15,225.00 | REJECTED | 8 GadgetX ordered, 5 in stock |
+| invoice_1006.csv | Acme Industrial Supplies | $2,750.00 | PAID | Clean |
+| invoice_1007.csv | MegaWidgets Corp | $15,635.00 | REJECTED | WidgetA and WidgetB exceed stock |
+| invoice_1008.txt | NoProd Industries | $9,900.00 | REJECTED | SuperGizmo / MegaSprocket not in inventory (guardrail; Grok timed out, rules decided) |
+| invoice_1009.json | (missing) | −$250.00 | REJECTED | Missing vendor, negative quantity and total |
+| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | REJECTED | WidgetA at $300 vs $250 reference, unexplained rush fee |
+| invoice_1011.pdf | Summit Manufacturing Co. | $3,000.00 | ERROR | Grok timed out, also on the end-of-batch retry; re-run to finish |
+| invoice_1011.txt | Summit Manufacturing Co. | $3,000.00 | DUPLICATE | Same invoice as the PDF |
+| invoice_1012.pdf | QuickShip Distributers | $9,975.00 | PAID | Clean (vendor-rename note is information only) |
+| invoice_1012.txt | QuickShip Distributers | $9,975.00 | DUPLICATE | Same invoice as the PDF |
+| invoice_1013.json | Atlas Industrial Supply | $22,512.80 | DUPLICATE | Same invoice as the PDF (validated second this run) |
+| invoice_1013.pdf | Atlas Industrial Supply | $22,512.80 | REJECTED | 22 WidgetA, 18 WidgetB, 9 GadgetX ordered — all exceed stock |
+| invoice_1014.xml | TechParts International | $4,125.00 | REJECTED | EUR invoice; prices can't be verified against USD reference |
+| invoice_1015.csv | Reliable Components Inc. | $6,500.00 | PAID | Clean |
+| invoice_1016.json | Widgets Inc. | $3,233.00 | REJECTED | WidgetC not in inventory |
+
+**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **9 min 20 s with 5 workers** on this run. That run also hit a Grok slowdown: two runs timed out and were retried at the end. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't.
 
 ## Safety and design decisions
 
 - **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total deviation — or a human approves on the review screen.
 - **Never pay twice:** the same invoice in two formats is caught by a content fingerprint and marked DUPLICATE; a reused number with different contents is rejected; re-running a file that was already paid or is awaiting review returns the stored result; a crash after payment is recovered from the checkpoint instead of paying again.
 - **Prompt-injection defenses:** vendor text is fenced as untrusted data in the agents' briefing, the policy lives in the system prompt, and every rule that matters is a code gate the agents cannot argue past.
-- **Fail closed:** missing quantities, prices, vendors or totals, totals too large to verify, and unreadable files all end in REJECT, review or ERROR — never in payment.
+- **Fail closed:** missing quantities, prices, vendors or totals, totals too large to verify, and unreadable files all end in REJECT, review or ERROR — never in payment. If the analyst/VP call fails (e.g. a Grok timeout) on an invoice that already broke a hard rule, it is still REJECTED by the guardrail, with a note that the agents' write-up is missing.
 - **Money is `Decimal`, never float:** amounts reconcile to the cent.
 - **Local review screen is guarded:** state-changing requests must come from the screen itself (CSRF origin check) and the server only answers to localhost (trusted-host check against DNS rebinding); uploads are size-limited and file names sanitized.
 - **Human decisions are final and recorded:** a human approve or reject is never overturned by a re-run, and approving over a hard rule requires a justification that is logged.
-- **Rules are data, not magic:** inventory is static reference data, so outcomes don't depend on processing order; business knobs (3 rounds, $10K threshold, 2 extraction retries) are in `invoice_agent/infra/config.py`.
+- **Rules are data, not magic:** inventory is static reference data, so outcomes don't depend on processing order (only which copy of a duplicate pair counts as the original can vary); business knobs (3 rounds, $10K threshold, 2 extraction retries) are in `invoice_agent/infra/config.py`.
 
 ## Testing
 
 ```bash
-.venv/bin/pytest                      # offline suite: 213 tests, ~6 s, no network (scripted fake agents)
+.venv/bin/pytest                      # offline suite: 227 tests, ~7 s, no network (scripted fake agents)
 .venv/bin/pytest -m live -v -s        # live tests against real Grok (reads XAI_API_KEY from .env)
-timeout 1500 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s   # all 20 samples end to end
+timeout 900 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s    # all 20 samples end to end, 5 at a time
 ```
 
-The offline suite covers reading, normalization, every rulebook check, the guardrail, the approval loop routing, the graph (pause/resume, duplicates, error paths), the runner's re-run policy, the CLI and the review screen. The live suite has 22 tests: one extraction test and the end-to-end sample test, which runs the whole folder into a temporary database (it never touches your `var/`) and asserts every outcome that code guarantees — rejections, duplicates, and that price-deviating invoices are never auto-paid. Outcomes that are genuine LLM judgment (PAID vs needs review for clean invoices) are printed, not asserted.
+The offline suite covers reading, normalization, every rulebook check, the guardrail, the approval loop routing, the graph (pause/resume, duplicates, error paths), the runner's re-run policy, parallel batches (same results as one-at-a-time, exactly one original per duplicate pair even when both copies are validated at the same moment, whole log lines, the end-of-batch timeout retry), the CLI and the review screen. The live suite has 18 tests: one extraction test and the end-to-end sample test, which runs the whole folder into a temporary database (it never touches your `var/`) and asserts every outcome that code guarantees — rejections, exactly one DUPLICATE / one reused-number rejection per pair, and that price-deviating invoices are never auto-paid. Outcomes that are genuine LLM judgment (PAID vs needs review for clean invoices) are printed, not asserted.
 
 ## Assumptions and limitations
 

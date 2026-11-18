@@ -3,6 +3,7 @@ import ast
 import json
 import operator
 import sqlite3
+import threading
 from decimal import Decimal, InvalidOperation
 
 from langchain_core.tools import BaseTool, tool
@@ -34,11 +35,15 @@ def _eval(node: ast.AST) -> Decimal:
 
 def make_tools(conn: sqlite3.Connection) -> dict[str, BaseTool]:
     """Build the agent tools as closures over the database connection."""
+    # LangChain runs an agent's parallel tool calls on worker threads, and one sqlite3 connection used by two threads
+    # at once mixes up rows (live: "conversion from NoneType to Decimal" on 1006). One query at a time per connection.
+    db_lock = threading.Lock()
 
     @tool
     def get_inventory(item: str) -> str:
         """Look up an inventory item by SKU (e.g. WidgetA). Returns its stock on hand and reference unit price, or says it was not found."""
-        row = db.get_inventory(conn, item)
+        with db_lock:
+            row = db.get_inventory(conn, item)
         if row is None:
             return f"{item}: not found in inventory"
         return json.dumps(row, default=str)
@@ -48,7 +53,9 @@ def make_tools(conn: sqlite3.Connection) -> dict[str, BaseTool]:
         """Find previously processed invoices, filtered by vendor name (case-insensitive) and/or exact invoice number. Returns number, vendor, amount, status and date for each."""
         wanted = normalize_invoice_number(invoice_number) if invoice_number else None
         out = []
-        for r in db.list_runs(conn):
+        with db_lock:
+            runs = db.list_runs(conn)
+        for r in runs:
             if vendor and (r["vendor"] or "").lower() != vendor.strip().lower():
                 continue
             if wanted and normalize_invoice_number(r["invoice_number"]) != wanted:

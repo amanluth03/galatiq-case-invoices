@@ -136,6 +136,26 @@ def create_pending_run(conn: sqlite3.Connection, run_id: str, source_path: str,
     conn.commit()
 
 
+def record_identity(conn: sqlite3.Connection, run_id: str, source_path: str, content_hash: str | None,
+                    invoice_number: str | None, fingerprint: str) -> None:
+    """Store a run's invoice number and fingerprint as soon as it is extracted, so a parallel run's duplicate check sees it."""
+    now = _now()
+    # A new run gets a PROCESSING row; an existing one (a re-run, or a web upload's pending row) keeps its status.
+    conn.execute(
+        """
+        INSERT INTO runs (run_id, source_path, content_hash, invoice_number, fingerprint, status,
+                          created_at, updated_at, state_json)
+        VALUES (?, ?, ?, ?, ?, 'PROCESSING', ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            content_hash=COALESCE(runs.content_hash, excluded.content_hash),
+            invoice_number=excluded.invoice_number, fingerprint=excluded.fingerprint, updated_at=excluded.updated_at
+        """,
+        (run_id, source_path, content_hash, invoice_number, fingerprint, now, now,
+         json.dumps({"run_id": run_id, "source_path": source_path})),
+    )
+    conn.commit()
+
+
 def set_stage(conn: sqlite3.Connection, run_id: str, stage: str) -> None:
     """Record the pipeline stage a run has reached (the graph node that just finished), for the live tracker."""
     conn.execute("UPDATE runs SET stage = ? WHERE run_id = ?", (stage, run_id))

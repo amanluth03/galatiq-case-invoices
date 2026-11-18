@@ -30,3 +30,11 @@ def test_load_settings_defaults(monkeypatch):
     assert Settings().xai_model == "grok-4-1-fast-non-reasoning"
     monkeypatch.setenv("XAI_MODEL", "")
     assert load_settings(env_file=None).xai_model == "grok-4-1-fast-non-reasoning"
+
+
+def test_batch_workers_default_and_env(monkeypatch):
+    """Batch runs use 5 workers by default; BATCH_WORKERS overrides it (1 = the old one-at-a-time behavior)."""
+    monkeypatch.delenv("BATCH_WORKERS", raising=False)
+    assert load_settings(env_file=None).batch_workers == 5 and Settings().batch_workers == 5
+    monkeypatch.setenv("BATCH_WORKERS", "1")
+    assert load_settings(env_file=None).batch_workers == 1

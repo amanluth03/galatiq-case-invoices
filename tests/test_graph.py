@@ -380,3 +380,16 @@ def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path
     assert {(f.severity, f.code) for f in out["flags"]} == {("needs_scrutiny", "over_10k"), ("info", "urgency_language")}
     assert out["final"].status == "PAID" and out["final"].decided_by == "agents"
     assert pay.calls == [("Widgets Inc.", Decimal("12500.00"))]
+
+
+def test_approval_failure_with_must_reject_fails_closed(conn):
+    """If the agents time out on 1002 (exceeds stock), the run still ends REJECTED by the guardrail, not ERROR; nothing is paid."""
+    ex = ScriptedIngestionAgent([extracted_1002()])
+    a, v = ScriptedAnalyst([RuntimeError("Request timed out.")]), ScriptedVP([])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, _ = run(graph, "invoice_1002.txt")
+    final = out["final"]
+    assert final.status == "REJECTED" and final.decided_by == "guardrail"
+    assert "GadgetX: 20 requested" in final.reasoning
+    assert "The agents' write-up was unavailable (Grok didn't respond)" in final.reasoning
+    assert len(pay.calls) == 0

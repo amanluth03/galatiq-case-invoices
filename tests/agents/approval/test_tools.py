@@ -73,3 +73,28 @@ def test_get_invoice_history_by_vendor(conn):
     assert rows[0]["invoice_number"] == "INV-1001" and "state" not in rows[0]
     assert json.loads(hist.invoke({"invoice_number": "1001"}))[0]["vendor"] == "Widgets Inc."
     assert hist.invoke({"vendor": "Nobody"}) == "no prior invoices found"
+
+
+def test_parallel_tool_calls_share_connection_safely(conn):
+    """The agents' tool calls run on several threads at once over one SQLite connection; every answer stays correct.
+    Without the lock this crashed live with "conversion from NoneType to Decimal" / ConversionSyntax (1006, 1012)."""
+    import threading
+    tools = make_tools(conn)
+    errors: list[str] = []
+
+    def hammer():
+        """Call the database-backed tools many times, recording any wrong answer or crash."""
+        for _ in range(300):
+            try:
+                if json.loads(tools["get_inventory"].invoke({"item": "WidgetA"}))["unit_price"] != "250.00":
+                    errors.append("wrong price")
+                tools["get_invoice_history"].invoke({"vendor": "x"})
+            except Exception as exc:
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

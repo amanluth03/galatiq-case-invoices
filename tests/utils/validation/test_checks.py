@@ -4,10 +4,11 @@ from decimal import Decimal as D
 
 import pytest
 
+from invoice_agent.infra import db
 from invoice_agent.infra.db import connect, init_db, save_run
 from invoice_agent.models import Invoice, LineItem
 from invoice_agent.utils.validation.checks import check_dates
-from invoice_agent.utils.validation.validate import find_duplicate, fingerprint, run_validation
+from invoice_agent.utils.validation.validate import claim_identity, find_duplicate, fingerprint, run_validation
 
 
 @pytest.fixture
@@ -318,3 +319,22 @@ def test_uncomputable_amounts_fail_closed(conn):
     flags = run_validation(conn, inv_1001(items=items, subtotal=None), "", [])
     unverifiable = [f for f in flags if f.code == "total_unverifiable"]
     assert len(unverifiable) == 1 and unverifiable[0].severity == "must_reject"
+
+
+def test_find_duplicate_ignores_duplicate_rows(conn):
+    """A run already marked DUPLICATE is never treated as the original, so re-running the real original keeps it original."""
+    inv = _inv_1011()
+    _save(conn, "copy", inv, "hash-txt")
+    conn.execute("UPDATE runs SET status = 'DUPLICATE' WHERE run_id = 'copy'")
+    res = find_duplicate(conn, inv, fingerprint(inv), "hash-pdf", "original")
+    assert res.duplicate_of is None and res.flags == []
+
+
+def test_claim_identity_records_pending_row(conn):
+    """claim_identity records the run's invoice number and fingerprint at once, so a later lookup sees it as the original."""
+    inv = _inv_1011()
+    first = claim_identity(conn, inv, fingerprint(inv), "hash-pdf", "r1", "a.pdf")
+    second = claim_identity(conn, inv, fingerprint(inv), "hash-txt", "r2", "a.txt")
+    assert first.duplicate_of is None and second.duplicate_of == "r1"
+    row = db.get_run(conn, "r1")
+    assert (row["invoice_number"], row["fingerprint"], row["content_hash"]) == ("INV-1011", fingerprint(inv), "hash-pdf")

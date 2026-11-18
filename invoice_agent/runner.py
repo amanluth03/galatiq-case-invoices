@@ -1,13 +1,19 @@
 """Runs the pipeline graph for files: one file, a whole directory, or resuming a paused human review.
 Also builds the real runtime (Grok agents + SQLite checkpointer) and saves every run to the database.
+Batches run several files at once (each worker thread on its own runtime), then retry Grok timeouts once.
 The web screen calls process_file with on_stage to show each run's progress live.
 """
 import logging
+import re
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
@@ -31,6 +37,14 @@ log = logging.getLogger(RUN_LOGGER)
 
 # Runs in these states are never re-run: PAID must not pay twice, a paused review must not be discarded.
 _KEEP_STATUSES = {"PAID", "NEEDS_HUMAN_REVIEW"}
+
+# Error texts of a passing Grok/network problem (worth one more try), as the openai/xAI client words them:
+# "Request timed out.", "Connection error.", "Error code: 502 - ...". Bad data or a 429 rate limit isn't retried.
+_TRANSIENT_ERROR = re.compile(r"timed out|timeout|connection error|error code: 5\d\d", re.IGNORECASE)
+
+# A function that builds a fresh runtime (deps + graph) with its own database connections.
+RuntimeFactory = Callable[[], tuple[Deps, object]]
+Job = TypeVar("Job")
 
 
 def build_runtime(settings: Settings) -> tuple[Deps, object]:
@@ -179,9 +193,68 @@ def invoice_files(dir: Path) -> list[Path]:
     return sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
 
 
-def process_dir(dir: Path, deps: Deps, graph) -> list[PipelineState]:
-    """Process every supported file in a directory, in filename order, one after another."""
-    return [process_file(p, deps, graph) for p in invoice_files(dir)]
+@dataclass
+class BatchResult:
+    """A finished batch: one final state per input, in input order, and how many timed-out runs were retried."""
+    states: list[PipelineState]
+    retried: int = 0
+
+
+def close_runtime(deps: Deps, graph) -> None:
+    """Close a runtime's own database connections (run history and checkpoints)."""
+    deps.conn.close()
+    checkpoint_conn = getattr(getattr(graph, "checkpointer", None), "conn", None)
+    if isinstance(checkpoint_conn, sqlite3.Connection):
+        checkpoint_conn.close()
+
+
+def is_transient_error(state: PipelineState) -> bool:
+    """True when a run ended ERROR because Grok or the network didn't answer (timeout, connection drop, 5xx)."""
+    final = state.get("final")
+    return final is not None and final.status == "ERROR" and bool(_TRANSIENT_ERROR.search(final.reasoning))
+
+
+def run_batch(jobs: list[Job], work: Callable[[Job, Deps, object], PipelineState],
+              runtime_factory: RuntimeFactory, workers: int) -> BatchResult:
+    """Run work(job, deps, graph) for every job on up to `workers` threads, then re-run transient ERRORs once.
+    Each thread builds its own runtime: a SQLite connection is never shared between threads."""
+    local = threading.local()
+    built: list[tuple[Deps, object]] = []
+    built_lock = threading.Lock()
+
+    def runtime() -> tuple[Deps, object]:
+        """This thread's runtime, built on first use."""
+        if getattr(local, "runtime", None) is None:
+            local.runtime = runtime_factory()
+            with built_lock:
+                built.append(local.runtime)
+        return local.runtime
+
+    def one(job: Job) -> PipelineState:
+        """Process one job on this thread's runtime."""
+        deps, graph = runtime()
+        return work(job, deps, graph)
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            # map keeps input order, whatever order the runs finish in.
+            states = list(pool.map(one, jobs))
+        # A Grok slowdown can time out a few runs mid-batch; one more try, one at a time, usually gets through.
+        # The normal re-run rules apply (same run id; PAID/paused/human-decided runs are never re-run).
+        retry = [i for i, s in enumerate(states) if is_transient_error(s)]
+        for i in retry:
+            log.warning("retrying timed-out run", extra={"fields": {"run_id": states[i]["run_id"]}})
+            states[i] = one(jobs[i])
+        return BatchResult(states=states, retried=len(retry))
+    finally:
+        for deps, graph in built:
+            close_runtime(deps, graph)
+
+
+def process_dir(dir: Path, runtime_factory: RuntimeFactory, workers: int = 1) -> BatchResult:
+    """Process every supported file in a directory, `workers` at a time; results come back in filename order."""
+    return run_batch(invoice_files(dir), lambda path, deps, graph: process_file(path, deps, graph),
+                     runtime_factory, workers)
 
 
 def resume_review(run_id: str, decision: str, note: str, justification: str | None,

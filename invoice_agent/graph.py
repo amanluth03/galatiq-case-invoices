@@ -23,7 +23,7 @@ from invoice_agent.infra.db import all_skus
 from invoice_agent.models import FinalOutcome, HumanDecision, JustifiedHumanDecision, PipelineState
 from invoice_agent.utils.guardrail import apply_guardrail, needs_human_confirmation
 from invoice_agent.utils.reader import read_file
-from invoice_agent.utils.validation.validate import find_duplicate, fingerprint, run_validation
+from invoice_agent.utils.validation.validate import claim_identity, fingerprint, run_validation
 
 
 @dataclass
@@ -53,6 +53,11 @@ def make_serializer() -> JsonPlusSerializer:
     ours = [cls for _, cls in inspect.getmembers(models, inspect.isclass)
             if issubclass(cls, BaseModel) and cls.__module__ == models.__name__]
     return JsonPlusSerializer(allowed_msgpack_modules=[*ours, ApprovalContext])
+
+
+# Added to a rule-based rejection when the analyst/VP call failed: the outcome stands without their write-up.
+AGENTS_UNAVAILABLE_NOTE = ("The agents' write-up was unavailable (Grok didn't respond), "
+                           "but these rules block payment on their own.")
 
 
 # Keys a run produces. read clears them so a re-run on the same thread_id never sees the last run's results.
@@ -97,7 +102,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         try:
             flags = run_validation(deps.conn, inv, state["raw_text"], state.get("extraction_issues", []))
             fp = fingerprint(inv)
-            dup = find_duplicate(deps.conn, inv, fp, state["content_hash"], state["run_id"])
+            dup = claim_identity(deps.conn, inv, fp, state["content_hash"], state["run_id"], state["source_path"])
         except Exception as exc:
             # A bug or DB error here must end the run as ERROR, never crash the caller.
             return Command(goto="fail", update={"error": _error_text(exc)})
@@ -114,7 +119,8 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         )}
 
     def approval(state: PipelineState) -> Command[Literal["guardrail", "log_rejection", "human_review", "fail"]]:
-        """Run the analyst <-> VP loop; APPROVE must still pass the guardrail, REJECT is logged, unsettled goes to a human."""
+        """Run the analyst <-> VP loop; APPROVE must still pass the guardrail, REJECT is logged, unsettled goes to a human.
+        If the agents fail, a must_reject flag still rejects the invoice; otherwise the run ends as ERROR."""
         ctx = ApprovalContext(
             invoice=state["invoice"], flags=state.get("flags", []),
             uncertainties=state.get("uncertainties", []), policy=APPROVAL_POLICY,
@@ -122,7 +128,12 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         try:
             out = approval_graph.invoke({"context": ctx, "rounds": [], "outcome": None})
         except Exception as exc:
-            # E.g. Grok timeout or malformed agent output: no decision means ERROR, not a crash.
+            forced = apply_guardrail(state.get("flags", []))
+            if forced is not None:
+                # Fail closed: a must_reject flag already decides the outcome, so a Grok timeout here still rejects.
+                forced = forced.model_copy(update={"reasoning": f"{forced.reasoning}. {AGENTS_UNAVAILABLE_NOTE}"})
+                return Command(goto="log_rejection", update={"guardrail_outcome": forced})
+            # E.g. Grok timeout or malformed agent output on a clean invoice: no decision means ERROR, not a crash.
             return Command(goto="fail", update={"error": _error_text(exc)})
         outcome = out["outcome"]
         goto = {"APPROVE": "guardrail", "REJECT": "log_rejection", "NEEDS_HUMAN_REVIEW": "human_review"}[outcome.decision]

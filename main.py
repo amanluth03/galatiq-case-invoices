@@ -15,7 +15,7 @@ from invoice_agent.infra import db
 from invoice_agent.infra.config import load_settings
 from invoice_agent.infra.logging_setup import setup_logging
 from invoice_agent.models import PipelineState
-from invoice_agent.runner import build_runtime, process_dir, process_file
+from invoice_agent.runner import build_runtime, close_runtime, process_dir, process_file
 
 console = Console()
 
@@ -128,8 +128,13 @@ def main(argv: list[str] | None = None) -> int:
         states = [process_file(Path(args.invoice_path), deps, graph)]
         show_panel(states[0])
     else:
-        states = process_dir(Path(args.invoice_dir), deps, graph)
+        # The runtime above only proved the key works: each batch worker builds its own (SQLite is per thread).
+        close_runtime(deps, graph)
+        batch = process_dir(Path(args.invoice_dir), lambda: build_runtime(settings), settings.batch_workers)
+        states = batch.states
         show_table(states)
+        if batch.retried:
+            console.print(f"{batch.retried} run(s) timed out on Grok and were retried once at the end")
     paused = sum(1 for s in states if s["final"].status == "NEEDS_HUMAN_REVIEW")
     if paused:
         console.print(f"{paused} need human review → open http://localhost:{args.port}")

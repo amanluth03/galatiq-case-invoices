@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 MAX_ROUNDS = 3
 SCRUTINY_THRESHOLD = Decimal("10000")
 MAX_EXTRACTION_RETRIES = 2
+# A batch (CLI --invoice_dir, the screen's "Process all samples") runs this many invoices at once; 1 = one by one.
+DEFAULT_BATCH_WORKERS = 5
 
 
 # grok-3 timed out / returned HTTP 500 on the analyst's tool-calling loop in live testing;
@@ -23,6 +25,7 @@ class Settings:
     """Environment-driven settings; all runtime files live under var_dir."""
     xai_api_key: str | None = None
     xai_model: str = DEFAULT_XAI_MODEL
+    batch_workers: int = DEFAULT_BATCH_WORKERS
     var_dir: Path = field(default_factory=lambda: Path("var"))
 
     @property
@@ -49,4 +52,5 @@ def load_settings(env_file: Path | None = Path(".env")) -> Settings:
     return Settings(
         xai_api_key=os.environ.get("XAI_API_KEY") or None,
         xai_model=os.environ.get("XAI_MODEL") or DEFAULT_XAI_MODEL,
+        batch_workers=int(os.environ.get("BATCH_WORKERS") or DEFAULT_BATCH_WORKERS),
     )

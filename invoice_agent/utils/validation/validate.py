@@ -1,18 +1,22 @@
 """Runs the full rulebook and detects duplicate / reused invoice numbers using a format-independent fingerprint.
-Sits at the validate stage; the graph calls find_duplicate separately from run_validation.
+Sits at the validate stage; the graph calls claim_identity (the duplicate check) separately from run_validation.
 """
 import hashlib
 import json
 import sqlite3
+import threading
 from decimal import Decimal
 
 from pydantic import BaseModel
 
-from invoice_agent.infra.db import find_runs_by_invoice_number
+from invoice_agent.infra.db import find_runs_by_invoice_number, record_identity
 from invoice_agent.models import Flag, Invoice
 from invoice_agent.utils.validation import checks
 
 _CENT = Decimal("0.01")
+
+# Batch workers validate in parallel: only one "have I seen this invoice before?" decision at a time in this process.
+_IDENTITY_LOCK = threading.Lock()
 
 
 def _money(d: Decimal | None) -> str:
@@ -43,6 +47,9 @@ def find_duplicate(conn: sqlite3.Connection, inv: Invoice, fp: str, content_hash
     if inv.invoice_number is None:
         return DuplicateCheck(duplicate_of=None, flags=[])
     priors = find_runs_by_invoice_number(conn, inv.invoice_number, exclude_run_id=run_id)
+    # A DUPLICATE run is a copy, never an original: re-running the real original (e.g. after a timeout) must not
+    # make it a duplicate of its own copy.
+    priors = [p for p in priors if p["status"] != "DUPLICATE"]
     # Re-processing the same file reuses run_id, so exclude_run_id already skips it; a same-hash prior
     # under another run_id is a real duplicate and must not be dropped.
     if not priors:
@@ -58,6 +65,16 @@ def find_duplicate(conn: sqlite3.Connection, inv: Invoice, fp: str, content_hash
         message=f"Invoice number {inv.invoice_number} was already processed with different contents — possible double-billing",
     )
     return DuplicateCheck(duplicate_of=None, flags=[flag])
+
+
+def claim_identity(conn: sqlite3.Connection, inv: Invoice, fp: str, content_hash: str, run_id: str,
+                   source_path: str) -> DuplicateCheck:
+    """Check for duplicates and record this run's invoice number + fingerprint in one locked step.
+    Two copies validated at the same moment can't both see "no prior run": exactly one becomes the original."""
+    with _IDENTITY_LOCK:
+        dup = find_duplicate(conn, inv, fp, content_hash, run_id)
+        record_identity(conn, run_id, source_path, content_hash, inv.invoice_number, fp)
+    return dup
 
 
 def run_validation(conn: sqlite3.Connection, inv: Invoice, raw_text: str, extraction_issues: list[str]) -> list[Flag]:
