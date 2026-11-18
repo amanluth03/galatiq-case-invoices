@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# One-command launcher for the review screen.
+# Sets up the Python environment on first run, makes sure an xAI key is configured,
+# then starts the web UI at http://127.0.0.1:8000 and opens it in your browser.
+# Extra flags are passed through to main.py, e.g. `./start --reset` for a clean slate.
+set -euo pipefail
+
+cd "$(dirname "$0")"          # always run from the repo root, wherever it was called from
+PORT="${PORT:-8000}"          # override with PORT=8010 ./start
+URL="http://127.0.0.1:$PORT"
+
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+fail() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+
+# 1. Find a Python 3.11+ interpreter (the project needs 3.11 or newer).
+find_python() {
+  for candidate in python3.13 python3.12 python3.11 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+# 2. Create the virtual environment and install dependencies the first time only.
+if [ ! -x .venv/bin/python ]; then
+  say "First run: creating a Python environment in .venv ..."
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --quiet --python 3.12 .venv || uv venv --quiet .venv
+  else
+    PY="$(find_python)" || fail "Python 3.11 or newer is required. Install it from https://www.python.org/downloads/ and run ./start again."
+    "$PY" -m venv .venv
+  fi
+fi
+
+if ! .venv/bin/python -c 'import invoice_agent, fastapi, langgraph' >/dev/null 2>&1; then
+  say "Installing dependencies (one time, about a minute) ..."
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install --quiet --python .venv/bin/python -e .
+  else
+    .venv/bin/python -m pip install --quiet --upgrade pip
+    .venv/bin/python -m pip install --quiet -e .
+  fi
+fi
+
+# 3. Make sure an xAI API key is configured in .env (ask for it once if missing).
+[ -f .env ] || cp .env.example .env
+if ! grep -qE '^XAI_API_KEY=.+' .env; then
+  if [ -t 0 ]; then
+    printf 'Paste your xAI API key (it is saved to .env, which git ignores): '
+    read -rs key; echo
+    [ -n "$key" ] || fail "No key entered. Add XAI_API_KEY=... to .env and run ./start again."
+    grep -v '^XAI_API_KEY=' .env > .env.tmp || true
+    { echo "XAI_API_KEY=$key"; cat .env.tmp; } > .env && rm -f .env.tmp
+  else
+    fail "XAI_API_KEY is missing. Add XAI_API_KEY=your-key to .env and run ./start again."
+  fi
+fi
+
+# 4. Refuse to start a second copy on the same port.
+if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  fail "Something is already running on port $PORT. Open $URL, or stop the other server first."
+fi
+
+# 5. Open the browser once the server is up (skip with NO_BROWSER=1), then run the server in the foreground (Ctrl+C stops it).
+[ "${NO_BROWSER:-0}" = "1" ] || (
+  for _ in $(seq 1 40); do
+    if curl -s -o /dev/null "$URL"; then
+      if command -v open >/dev/null 2>&1; then open "$URL"
+      elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL" >/dev/null 2>&1
+      fi
+      exit 0
+    fi
+    sleep 0.5
+  done
+) &
+
+say "Starting the review screen at $URL (press Ctrl+C to stop) ..."
+exec .venv/bin/python main.py --serve --port "$PORT" "$@"
