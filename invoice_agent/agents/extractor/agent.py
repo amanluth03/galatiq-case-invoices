@@ -1,12 +1,12 @@
 """Extraction stage: asks an LLM extractor for structured fields, then self-corrects using code checks.
-Sits after read and before validate; the real Grok extractor is plugged in as an Extractor callable (Task 9).
+Sits after read and before validate; make_extractor builds the real Grok Extractor, tests plug in fakes.
 """
 from typing import Callable
 
 from pydantic import BaseModel
 
 from invoice_agent.utils.arithmetic import reconcile
-from invoice_agent.agents.extractor.prompt import EXTRACTION_PROMPT  # noqa: F401  (re-exported for callers and tests)
+from invoice_agent.agents.extractor.prompt import EXTRACTION_PROMPT
 from invoice_agent.infra.config import MAX_EXTRACTION_RETRIES
 from invoice_agent.utils.normalize import to_invoice
 from invoice_agent.models import ExtractedInvoice, Invoice, Uncertainty
@@ -59,3 +59,19 @@ def run_extraction(
         raise ExtractionFailed(f"extractor produced no usable result after {attempts} attempts: {errors}")
     invoice, uncertainties, issues = last
     return ExtractionResult(invoice=invoice, uncertainties=uncertainties, issues=issues, attempts=attempts)
+
+
+def make_extractor(model) -> Extractor:
+    """Build the Grok Extractor: structured output into ExtractedInvoice, with the previous attempt's errors fed back."""
+    structured = model.with_structured_output(ExtractedInvoice)
+
+    def extract(raw_text: str, errors: list[str]) -> ExtractedInvoice:
+        """Send the prompt and raw text (plus a correction request on retries) and return the parsed extraction."""
+        messages = [("system", EXTRACTION_PROMPT), ("user", raw_text)]
+        if errors:
+            # Self-correction: tell the model exactly which checks its last answer failed.
+            listed = "\n".join(f"- {e}" for e in errors)
+            messages.append(("user", f"Your previous attempt had these problems. Re-read the text and fix them:\n{listed}"))
+        return structured.invoke(messages)
+
+    return extract
