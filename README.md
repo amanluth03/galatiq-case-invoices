@@ -47,33 +47,30 @@ flowchart TD
     ingest --> validate["Validate<br/><i>Code: checks stock, prices, math, duplicates</i>"]
     validate --> dup{"Duplicate?"}
     dup -- "Yes" --> stop(["Marked duplicate, not paid"])
-    dup -- "No" --> review["Analyst and VP review<br/><i>LLM: analyst recommends, VP checks it</i>"]
-    review --> guard["Guardrail<br/><i>Code: enforces the hard rules before any payment</i>"]
-    guard --> outcome{"Outcome"}
-    outcome -- "Approved" --> pay["Pay<br/><i>Code: calls mock_payment</i>"]
-    outcome -- "Rejected" --> reject["Log rejection<br/><i>Code: saves the reasons</i>"]
-    outcome -- "Needs a person" --> human["Human review<br/><i>Person: approves or rejects on the review screen</i>"]
+    dup -- "No" --> analyst
+
+    subgraph review["Analyst and VP review, up to 3 rounds"]
+        analyst["Analyst agent<br/><i>LLM with tools: drafts APPROVE or REJECT</i>"] --> vp["VP agent<br/><i>LLM: checks the analyst's reasoning</i>"]
+        vp -- "Not satisfied: feedback" --> analyst
+    end
+
+    vp -- "Satisfied" --> guard["Guardrail<br/><i>Code: final safety check before any payment</i>"]
+    guard -- "Approved and clean" --> pay["Pay<br/><i>Code: calls mock_payment</i>"]
+    guard -- "Rejected" --> reject["Log rejection<br/><i>Code: saves the reasons</i>"]
+    guard -- "Needs a person" --> human["Human review<br/><i>Person: approves or rejects on the review screen</i>"]
 
     classDef llm fill:#cfe6ff,stroke:#2f80ed,color:#0b3a75
     classDef person fill:#ffe3c2,stroke:#e08a1e,color:#5a3000
-    class ingest,review llm
+    class ingest,analyst,vp llm
     class human person
 ```
 
-**Inside the analyst and VP review.** The two agents go back and forth until the VP is satisfied with the reasoning, for at most 3 rounds:
+**What the guardrail does.** It is a few lines of plain code that sit between the agents and the money, so no AI answer on its own can get a bad invoice paid. When the agents approve, it checks three things in order:
+1. **Any hard-rule flag** (for example an item not in inventory, or more than is in stock) turns the approval into **Rejected**.
+2. **Any price, total or currency that differs from Acme's records**, or an amount that isn't printed on the invoice, sends it to **Needs a person** instead of paying.
+3. **Only an approval with neither problem is Paid.**
 
-```mermaid
-flowchart LR
-    analyst["Analyst<br/><i>drafts APPROVE or REJECT</i>"] --> vp["VP<br/><i>checks the reasoning</i>"]
-    vp --> ok{"Satisfied?"}
-    ok -- "No: feedback" --> analyst
-    ok -- "Yes" --> done(["Decision goes to the guardrail"])
-
-    classDef llm fill:#cfe6ff,stroke:#2f80ed,color:#0b3a75
-    class analyst,vp llm
-```
-
-If they still disagree after 3 rounds, the invoice goes to a person. The guardrail then sends every approval through three code checks: a broken hard rule means **Rejected**, a price, total or currency that differs from Acme's records means **Needs a person**, and only a clean approval is **Paid**.
+Agent rejections go straight to **Rejected**, and if the analyst and VP still disagree after 3 rounds, the invoice goes to **Needs a person**.
 
 ### How an invoice moves through the app
 
