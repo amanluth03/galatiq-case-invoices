@@ -28,7 +28,7 @@ That's it. The script:
 2. asks for your xAI API key if `.env` doesn't have one yet (saved to `.env`, which git ignores),
 3. starts the review screen empty (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
 
-Once it's open, drop a file from `data/invoices/` on the drop zone (or choose one) and press **Process this invoice**: its story fills in step by step as it happens (about 20 seconds). Try `invoice_1010.txt` to see a person step in. **Run all 20 sample invoices** processes the whole set (about 5 minutes, 5 at a time); every invoice appears in the **Invoices** list beside the story, and clicking one shows its story.
+Once it's open, press **Choose a file** and pick one from `data/invoices/` (choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its own page opens and the story fills in step by step as it happens (about 20 seconds). Try `invoice_1010.txt` to see a person step in. **Process another invoice** goes back home. **Run all 20 sample invoices** processes the whole set (about 5 minutes, 5 at a time) and fills the dashboard, which updates while they run.
 
 | Variation | What it does |
 |---|---|
@@ -52,7 +52,11 @@ cp .env.example .env             # only if ./start hasn't created it; put your k
 | `python main.py --reset` | Wipe run history, results and checkpoints (inventory is re-seeded) for a clean demo; combine with the other flags |
 | `python main.py --serve` | Start the review screen at **http://127.0.0.1:8000** |
 
-The review screen is one page that tells each invoice's story. Drop in a file (or run all the samples) and watch its 7 steps appear as they happen: **read the file**, **the ingestion agent read it** (vendor, total, items, due date and anything it was unsure about, with the original document one click away), **checked against inventory and rules** (each finding marked blocking, needs a look or FYI), **the analyst agent** (its recommendation and reasoning, and what it is looking up while it works), **the VP agent** (agrees, or sends it back for another round), **the guardrail** (which hard rule, if any, decides) and **the decision** (paid, rejected, duplicate, error, or **waiting for you**, with Approve and Reject right there). The **Invoices** list beside it shows every invoice with its status and amount. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
+The review screen has a home page and one page per invoice. The home page (`/`) has the drop card and a dashboard of every invoice. Tiles: **Waiting for you** (count and dollars at stake), **Paid** dollars, **Rejected** dollars, **Duplicates**, **Errors** and **Running**. The table shows file, vendor, amount, status, a one-line why and the time, with waiting invoices first, then running, then newest. Each invoice opens its own page (`/invoices/<id>`) with the live 7-step story, the decision panel when it waits for you, an **Invoice details** section, and the Invoices list beside it.
+
+The 7 steps: **read the file**, **the ingestion agent read it** (vendor, total, items, due date and anything it was unsure about), **checked against inventory and rules** (each finding marked blocking, needs a look or FYI), **the analyst agent** (its recommendation and reasoning, and what it is looking up while it works), **the VP agent** (agrees, or sends it back for another round), **the guardrail** (which hard rule, if any, decides) and **the decision** (paid, rejected, duplicate, error, or **waiting for you**, with Approve and Reject right there). If a hard rule already decides the invoice, steps 4 and 5 read "Skipped: a hard rule already decides this invoice, so the agents weren't needed." and step 6 names the rule.
+
+**Invoice details** shows the original document with the uncertain spots highlighted beside the extracted fields and line items; every flag grouped Blocking / Needs a look / FYI; the over-$10K checklist; the agents' open questions; and the full analyst and VP exchange per round (collapsible). Legend: "Highlighted: the reader wasn't sure. Hover or tab to see why." Tapping a highlight on a phone shows the reason too. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
 
 Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history), `var/checkpoints.db` (paused runs), `var/logs/run.jsonl` (one structured JSON line per pipeline stage). The model is set by `XAI_MODEL` (default `grok-4-1-fast-non-reasoning`); `BATCH_WORKERS` (default 5, `1` = one at a time) sets how many invoices a batch runs at once.
 
@@ -151,7 +155,7 @@ AI is used only where judgment is needed: reading messy documents, and weighing 
 | `invoice_agent/agents/` | Everything that calls Grok: `ingestion/`, `analyst/`, `vp/` (prompt + agent each), `approval/` (loop, policy, tools, briefing), `llm.py` |
 | `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `payments.py` |
 | `invoice_agent/infra/` | `config.py` (settings and business knobs), `db.py` (SQLite inventory + run history), `logging_setup.py` |
-| `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs and their live progress), `story.py` (the 7-step invoice story, one builder for live and finished invoices), `security.py`, `highlight.py`, `templates/`, `static/` |
+| `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs and their live progress), `views.py` (dashboard and invoice-details view models), `story.py` (the 7-step story builder, one for live and finished invoices), `security.py`, `highlight.py`, `templates/` (`home.html`, `invoice.html`, `_dashboard.html`, `_steps.html`, `_details.html`, `base.html`, `message.html`), `static/` |
 | `tests/` | Mirrors the package; offline tests use scripted fake agents |
 
 ## The rulebook
@@ -212,7 +216,7 @@ Paying a vendor is exactly that kind of action: hard to undo, and it needs sign-
 
 **How it works.** The graph pauses at a LangGraph `interrupt` and its state is saved in a SQLite checkpointer; the run resumes from the review screen when the reviewer answers. The CLI never blocks: a paused invoice ends the run as `NEEDS_HUMAN_REVIEW`.
 
-**Try it.** Run `./start`, then drop `data/invoices/invoice_1010.txt` (a rush fee changes the price) or `data/invoices/invoice_1014.xml` (billed in EUR) on the drop zone and press **Process this invoice**. Watch the story stop at "Waiting for you", then approve or reject it.
+**Try it.** Run `./start`, press **Choose a file** and pick `data/invoices/invoice_1010.txt` (a rush fee changes the price; choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its page opens with the story filling in live and it stops at "Waiting for you", where you approve or reject. `data/invoices/invoice_1014.xml` (billed in EUR) works too. **Process another invoice** goes back home.
 
 ## Safety and design decisions
 
@@ -263,7 +267,7 @@ Each item below was found by code review, a security review or a live run agains
 ## Testing
 
 ```bash
-.venv/bin/pytest                      # offline suite: 254 tests, ~7 s, no network (scripted fake agents)
+.venv/bin/pytest                      # offline suite: 266 tests, ~7 s, no network (scripted fake agents)
 .venv/bin/pytest -m live -v -s        # live tests against real Grok (reads XAI_API_KEY from .env)
 timeout 900 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s    # all 20 samples end to end, 5 at a time
 ```
