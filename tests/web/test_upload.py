@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from invoice_agent.infra import db
 from invoice_agent.infra.config import Settings
+from invoice_agent.models import FinalOutcome, Invoice
 from invoice_agent.runner import process_file
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
 from invoice_agent.web import app as web_app
@@ -207,3 +208,105 @@ def test_process_file_reports_stages(conn):
     state = process_file(INVOICES / "invoice_1001.txt", deps, graph, run_id="fixed-id", on_stage=seen.append)
     assert seen[:4] == ["read", "extract", "validate", "approval"]
     assert seen[-1] == "pay" and state["run_id"] == "fixed-id"
+
+
+# ---------- fix round 1 ----------
+
+def test_failed_rerun_keeps_content_hash_and_reupload_finds_same_run(conn, tmp_path):
+    """An ERROR run re-run by upload whose runtime fails keeps its content_hash, so the next upload reuses its id."""
+    import hashlib
+
+    content = (INVOICES / "invoice_1001.txt").read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    db.save_run(conn, {"run_id": "old", "source_path": "data/invoices/invoice_1001.txt", "content_hash": digest,
+                       "final": FinalOutcome(status="ERROR", decided_by="system", reasoning="Request timed out.")})
+
+    def broken():
+        """A runtime factory that fails like build_runtime does without a key."""
+        raise RuntimeError("XAI_API_KEY is not set")
+
+    deps, graph, _ = build(conn, [])
+    app = create_app(deps, graph, conn, settings=Settings(var_dir=tmp_path), runtime_factory=broken)
+    client = TestClient(app, follow_redirects=False, headers={"origin": SAME_ORIGIN})
+    first = upload(client, "invoice_1001.txt", content)
+    wait_for_jobs(app)
+    assert first.headers["location"] == "/invoices/old"
+    assert db.get_run(conn, "old")["content_hash"] == digest
+    again = upload(client, "invoice_1001.txt", content)
+    wait_for_jobs(app)
+    assert again.headers["location"] == "/invoices/old" and len(db.list_runs(conn)) == 1
+
+
+def test_partial_save_never_erases_identity_columns(conn):
+    """Re-saving a run with a state that lacks the hash, number, vendor or fingerprint keeps the stored ones."""
+    db.save_run(conn, {"run_id": "r1", "source_path": "a.txt", "content_hash": "h1", "fingerprint": "fp",
+                       "invoice": make_invoice(), "final": FinalOutcome(status="REJECTED", decided_by="agents",
+                                                                       reasoning="x")})
+    db.save_run(conn, {"run_id": "r1", "final": FinalOutcome(status="ERROR", decided_by="system", reasoning="y")})
+    row = db.get_run(conn, "r1")
+    assert (row["source_path"], row["content_hash"], row["fingerprint"], row["invoice_number"], row["vendor"]) == \
+        ("a.txt", "h1", "fp", "INV-1", "Widgets Inc.")
+    assert row["status"] == "ERROR"
+
+
+def make_invoice():
+    """A minimal invoice with a number and vendor, for identity-column tests."""
+    return Invoice(invoice_number="INV-1", vendor="Widgets Inc.")
+
+
+def test_long_filename_is_truncated_and_saved(conn, tmp_path):
+    """A 300-character file name is accepted, its stem cut to 100 characters and the extension kept."""
+    client, app = make_client(conn, tmp_path)
+    resp = upload(client, "a" * 300 + ".txt", (INVOICES / "invoice_1001.txt").read_bytes())
+    wait_for_jobs(app)
+    assert resp.status_code == 303
+    run_id = resp.headers["location"].removeprefix("/invoices/")
+    assert [p.name for p in (tmp_path / "uploads").iterdir()] == [f"{run_id}_{'a' * 100}.txt"]
+
+
+@pytest.mark.parametrize("name", [".txt", "...", "../.txt"])
+def test_nameless_upload_is_400(conn, tmp_path, name):
+    """A name that sanitizes to nothing (a bare extension or only dots) is refused with 400 and nothing saved."""
+    client, _ = make_client(conn, tmp_path)
+    resp = upload(client, name, b"Invoice")
+    assert resp.status_code == 400
+    assert db.list_runs(conn) == [] and not (tmp_path / "uploads").exists()
+
+
+def test_oversize_content_length_is_413_before_parsing(conn, tmp_path):
+    """A request declaring a body far over 5 MB is refused with 413 by its Content-Length, before the form is read."""
+    client, _ = make_client(conn, tmp_path)
+    resp = client.post("/upload", content=b"x", headers={
+        "content-type": "multipart/form-data; boundary=b", "content-length": str(MAX_UPLOAD_BYTES * 2)})
+    assert resp.status_code == 413 and "5 MB" in resp.text
+
+
+def test_finished_jobs_are_pruned(conn, tmp_path):
+    """Starting a new job drops threads that have finished, so the list doesn't grow with every upload."""
+    client, app = make_client(conn, tmp_path)
+    upload(client, "a.txt", (INVOICES / "invoice_1001.txt").read_bytes())
+    wait_for_jobs(app)
+    upload(client, "b.txt", (INVOICES / "invoice_1002.txt").read_bytes())
+    assert len(app.state.jobs) == 1
+    wait_for_jobs(app)
+
+
+def test_final_outcome_rejects_processing():
+    """PROCESSING is a run-row status only: a FinalOutcome can never claim it."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        FinalOutcome(status="PROCESSING", decided_by="system", reasoning="x")
+
+
+def test_reupload_while_processing_says_in_progress(conn, tmp_path):
+    """Uploading a file whose run is still processing opens it with an "already being processed" notice."""
+    import hashlib
+
+    content = (INVOICES / "invoice_1001.txt").read_bytes()
+    db.create_pending_run(conn, "r1", "var/uploads/r1_invoice_1001.txt", hashlib.sha256(content).hexdigest())
+    client, _ = make_client(conn, tmp_path)
+    # The app's startup recovery marked r1 ERROR; put it back in progress, as a live job would hold it.
+    db.create_pending_run(conn, "r1", "var/uploads/r1_invoice_1001.txt")
+    resp = upload(client, "invoice_1001.txt", content)
+    assert resp.headers["location"] == "/invoices/r1?seen=1"
+    assert "already being processed" in client.get(resp.headers["location"]).text

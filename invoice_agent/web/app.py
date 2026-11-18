@@ -39,7 +39,11 @@ HERE = Path(__file__).parent
 SAMPLES_DIR = HERE.parent.parent / "data" / "invoices"
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# Room for the multipart envelope (boundaries, headers) around a file of the maximum size.
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
+MAX_STEM_CHARS = 100
 ALLOWED_TYPES_TEXT = "PDF, TXT, JSON, CSV or XML"
+TOO_LARGE_MESSAGE = "Invoices can be up to 5 MB. This one is larger, so it wasn't processed."
 INTERRUPTED_REASON = "Processing was interrupted — re-upload the file to try again."
 
 STATUS_LABELS = {
@@ -202,17 +206,34 @@ def stage_label(stage: str | None) -> str:
     return "Waiting its turn" if step < 0 else PROGRESS_STEPS[step]
 
 
+def _declared_length(request: Request) -> int:
+    """The request's Content-Length header as a number (0 when missing or malformed)."""
+    try:
+        return int(request.headers.get("content-length", "0"))
+    except ValueError:
+        return 0
+
+
 def display_name(row: dict) -> str:
     """The file's name as the user uploaded it (without the run-id prefix uploads are saved with)."""
     return Path(row["source_path"] or "").name.removeprefix(f"{row['run_id']}_")
 
 
 def safe_filename(name: str) -> str:
-    """Reduce an uploaded file name to [A-Za-z0-9._-], dropping any folders so it can't point outside uploads/."""
+    """Reduce an uploaded file name to [A-Za-z0-9._-] with a stem of at most 100 characters, dropping any folders
+    so it can't point outside uploads/; "" when nothing usable is left (e.g. ".txt" or "...")."""
     # Both separators: a Windows browser may send C:\path\file.txt.
     base = name.replace("\\", "/").rsplit("/", 1)[-1]
-    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).lstrip(".")
-    return cleaned or "invoice"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    stem, dot, suffix = cleaned.rpartition(".")
+    if not dot:
+        stem, suffix = cleaned, ""
+    # Leading dots would make a hidden file; an empty stem ("x/.txt") means there's no real name at all.
+    stem = stem.lstrip(".")
+    if not stem:
+        return ""
+    # Cap the stem so <run_id>_<name> stays well under the file system's 255-character limit.
+    return stem[:MAX_STEM_CHARS] + (f".{suffix}" if dot else "")
 
 
 # ---------- view models ----------
@@ -423,8 +444,9 @@ def _close_runtime(deps: Deps, graph) -> None:
         checkpoint_conn.close()
 
 
-def run_jobs(jobs: list[tuple[str, Path]], runtime_factory: Callable[[], tuple[Deps, object]], app_db: Path) -> None:
-    """Background job: run each (run_id, file) through the pipeline in order, on this thread's own runtime."""
+def run_jobs(jobs: list[tuple[str, Path, str]], runtime_factory: Callable[[], tuple[Deps, object]],
+             app_db: Path) -> None:
+    """Background job: run each (run_id, file, content hash) through the pipeline in order, on this thread's own runtime."""
     try:
         # Own runtime per job: a SQLite connection must never be shared between threads.
         deps, graph = runtime_factory()
@@ -433,13 +455,13 @@ def run_jobs(jobs: list[tuple[str, Path]], runtime_factory: Callable[[], tuple[D
         log.warning("background job could not start", extra={"fields": {"error": str(exc)}})
         conn = db.connect(app_db)
         try:
-            for run_id, path in jobs:
-                _save_error(conn, run_id, str(path), f"Couldn't start processing: {exc}")
+            for run_id, path, digest in jobs:
+                _save_error(conn, run_id, str(path), f"Couldn't start processing: {exc}", digest)
         finally:
             conn.close()
         return
     try:
-        for run_id, path in jobs:
+        for run_id, path, digest in jobs:
             try:
                 db.set_stage(deps.conn, run_id, "started")
                 state = process_file(path, deps, graph, run_id=run_id,
@@ -447,11 +469,11 @@ def run_jobs(jobs: list[tuple[str, Path]], runtime_factory: Callable[[], tuple[D
                 if state["run_id"] != run_id:
                     # Two uploads of the same file raced; the other run holds the result.
                     _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
-                                "being processed at the same time — open that one from the queue.")
+                                "being processed at the same time — open that one from the queue.", digest)
             except Exception as exc:
                 # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
                 log.exception("background run failed", extra={"fields": {"run_id": run_id}})
-                _save_error(deps.conn, run_id, str(path), f"Processing failed: {exc}")
+                _save_error(deps.conn, run_id, str(path), f"Processing failed: {exc}", digest)
     finally:
         _close_runtime(deps, graph)
 
@@ -474,7 +496,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
     decision_lock = threading.Lock()
     # One intake at a time, so two uploads of the same file can't both claim it as new.
     intake_lock = threading.Lock()
-    # Every background job thread, so tests (and nothing else) can wait for them to finish.
+    # Background job threads still running (finished ones are pruned), so tests can wait for them to finish.
     app.state.jobs = []
 
     # A run still PROCESSING at startup belonged to a server that was stopped mid-run: nothing will finish it.
@@ -482,10 +504,11 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if row["status"] == "PROCESSING":
             _save_error(conn, row["run_id"], row["source_path"], INTERRUPTED_REASON, row["content_hash"])
 
-    def start_jobs(jobs: list[tuple[str, Path]]) -> None:
-        """Process (run_id, file) pairs one after another on a new daemon thread."""
+    def start_jobs(jobs: list[tuple[str, Path, str]]) -> None:
+        """Process (run_id, file, content hash) jobs one after another on a new daemon thread."""
         thread = threading.Thread(target=run_jobs, args=(jobs, runtime_factory, settings.app_db), daemon=True)
-        app.state.jobs.append(thread)
+        # Drop finished threads so a long-running server doesn't keep one per upload forever.
+        app.state.jobs = [t for t in app.state.jobs if t.is_alive()] + [thread]
         thread.start()
 
     def claim(content_hash: str) -> tuple[str, bool]:
@@ -526,6 +549,10 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 "message": "This action has to come from the review screen itself, so it was blocked. "
                            "Nothing was approved, rejected or paid. Open the invoice here and try again.",
             }, 403)
+        too_big = _declared_length(request) > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES
+        if request.url.path == "/upload" and too_big:
+            # Refuse before the body is parsed; the route checks the real size again as a backstop.
+            return refuse(request, 413, "File too large", TOO_LARGE_MESSAGE)
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
@@ -539,9 +566,13 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         row = db.get_run(conn, run_id)
         if row is None:
             return not_found(request)
-        notice = "Your decision has been recorded." if decided else (
-            "This file was uploaded before, so here is that invoice — it wasn't processed or paid again."
-            if seen else None)
+        notice = None
+        if decided:
+            notice = "Your decision has been recorded."
+        elif seen and row["status"] == "PROCESSING":
+            notice = "This file is already being processed — here is its progress."
+        elif seen:
+            notice = "This file was uploaded before, so here is that invoice — it wasn't processed or paid again."
         return render_detail(request, row, notice=notice)
 
     @app.get("/invoices/{run_id}/status")
@@ -561,6 +592,9 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if file is None or not file.filename:
             return refuse(request, 400, "No file chosen", "Choose an invoice file to upload, then try again.")
         name = safe_filename(file.filename)
+        if not name:
+            return refuse(request, 400, "File name not allowed",
+                          f"“{file.filename}” has no usable name. Rename the file (for example invoice.pdf) and try again.")
         if Path(name).suffix.lower() not in SUPPORTED_SUFFIXES:
             return refuse(request, 400, "File type not supported",
                           f"Upload a {ALLOWED_TYPES_TEXT} file. “{file.filename}” isn't one of those, "
@@ -568,8 +602,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         # Read one byte past the limit: enough to know it's too big without holding a huge file in memory.
         content = file.file.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
-            return refuse(request, 413, "File too large",
-                          "Invoices can be up to 5 MB. This one is larger, so it wasn't processed.")
+            return refuse(request, 413, "File too large", TOO_LARGE_MESSAGE)
         digest = hashlib.sha256(content).hexdigest()  # the same content hash the reader computes
         with intake_lock:
             run_id, needed = claim(digest)
@@ -582,7 +615,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
             uploads.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
             db.create_pending_run(conn, run_id, str(dest), digest)
-        start_jobs([(run_id, dest)])
+        start_jobs([(run_id, dest, digest)])
         return RedirectResponse(f"/invoices/{run_id}", status_code=303)
 
     @app.post("/process-samples")
@@ -598,7 +631,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 db.create_pending_run(conn, run_id, str(path), digest)
                 # Shown as "Waiting its turn" until the job reaches this file.
                 db.set_stage(conn, run_id, QUEUED)
-                jobs.append((run_id, path))
+                jobs.append((run_id, path, digest))
         if jobs:
             start_jobs(jobs)
         return RedirectResponse("/", status_code=303)

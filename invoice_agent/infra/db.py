@@ -94,15 +94,19 @@ def save_run(conn: sqlite3.Connection, state: PipelineState) -> None:
     final = data.get("final") or {}
     now = _now()
     # Upsert: re-saving a run updates it but keeps its original created_at.
+    # COALESCE: a partial save (e.g. an ERROR before the file was read) must never erase a run's identity columns;
+    # losing content_hash would let a re-upload start a new run and break the never-pay-twice recovery.
     conn.execute(
         """
         INSERT INTO runs (run_id, source_path, content_hash, invoice_number, vendor, fingerprint,
                           status, amount, created_at, updated_at, state_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
-            source_path=excluded.source_path, content_hash=excluded.content_hash,
-            invoice_number=excluded.invoice_number, vendor=excluded.vendor,
-            fingerprint=excluded.fingerprint, status=excluded.status, amount=excluded.amount,
+            source_path=COALESCE(excluded.source_path, runs.source_path),
+            content_hash=COALESCE(excluded.content_hash, runs.content_hash),
+            invoice_number=COALESCE(excluded.invoice_number, runs.invoice_number),
+            vendor=COALESCE(excluded.vendor, runs.vendor),
+            fingerprint=COALESCE(excluded.fingerprint, runs.fingerprint), status=excluded.status, amount=excluded.amount,
             updated_at=excluded.updated_at, state_json=excluded.state_json
         """,
         (
