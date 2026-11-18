@@ -173,5 +173,7 @@ class PipelineState(TypedDict, total=False):
     approval: ApprovalOutcome
     # Set only when a human resumed the run from human_review.
     human_decision: HumanDecision
+    # The guardrail's forced rejection from this run; log_rejection writes it as the final outcome.
+    guardrail_outcome: FinalOutcome | None
     final: FinalOutcome
     error: str | None

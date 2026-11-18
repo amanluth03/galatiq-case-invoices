@@ -127,7 +127,7 @@ def test_needs_human_review_pauses(conn):
     out, _ = run(graph, "invoice_1001.txt")
     assert "__interrupt__" in out
     assert out["__interrupt__"][0].value == {"run_id": "run-1", "reason": "needs human review"}
-    assert "final" not in out
+    assert out.get("final") is None
     assert out["approval"].decision == "NEEDS_HUMAN_REVIEW"
     assert len(pay.calls) == 0
     assert len(a.calls) == 3 and len(v.calls) == 3
@@ -261,3 +261,31 @@ def test_validation_failure_ends_in_error(conn, monkeypatch):
     assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
     assert "items" in out["final"].reasoning
     assert len(a.calls) == 0 and len(pay.calls) == 0
+
+
+def test_reused_thread_does_not_carry_over_previous_outcome(conn):
+    """Re-running on the same thread_id starts clean: a paid first run cannot leak PAID into a rejected second run."""
+    ex = ScriptedExtractor([make_extracted(), make_extracted()])
+    a = ScriptedAnalyst([make_recommendation(), make_recommendation("REJECT")])
+    v = ScriptedVP([make_review(), make_review(final_decision="REJECT", reasoning="nope")])
+    graph, pay = make_graph(conn, ex, a, v)
+    first, _ = run(graph, "invoice_1001.txt", "same")
+    second, _ = run(graph, "invoice_1001.txt", "same")
+    assert first["final"].status == "PAID"
+    assert second["approval"].decision == "REJECT"
+    assert second["final"].status == "REJECTED" and second["final"].decided_by == "agents"
+    assert second["final"].reasoning == "nope"
+    assert len(pay.calls) == 1
+
+
+def test_reused_thread_after_guardrail_block_uses_new_decision(conn):
+    """A guardrail block in run 1 must not be replayed as the rejection reason of a later agent REJECT on the same thread."""
+    ex = ScriptedExtractor([extracted_1002(), extracted_1002()])
+    a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST), make_recommendation("REJECT", checklist=FULL_CHECKLIST)])
+    v = ScriptedVP([make_review(), make_review(final_decision="REJECT", reasoning="stock short")])
+    graph, pay = make_graph(conn, ex, a, v)
+    first, _ = run(graph, "invoice_1002.txt", "same")
+    second, _ = run(graph, "invoice_1002.txt", "same")
+    assert first["final"].decided_by == "guardrail"
+    assert second["final"].decided_by == "agents" and second["final"].reasoning == "stock short"
+    assert len(pay.calls) == 0

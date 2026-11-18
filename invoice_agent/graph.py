@@ -42,6 +42,14 @@ def _has_must_reject(state: PipelineState) -> bool:
     return any(f.severity == "must_reject" for f in state.get("flags", []))
 
 
+# Keys a run produces. read clears them so a re-run on the same thread_id never sees the last run's results.
+_RUN_RESET: dict = {
+    "invoice": None, "fingerprint": None, "duplicate_of": None, "flags": [], "uncertainties": [],
+    "extraction_issues": [], "approval": None, "human_decision": None, "guardrail_outcome": None,
+    "final": None, "error": None,
+}
+
+
 def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
     """Wire all pipeline stages into one graph; the checkpointer lets human_review pause and resume."""
     approval_graph = build_approval_graph(deps.analyst, deps.vp)
@@ -51,10 +59,10 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         try:
             r = read_file(Path(state["source_path"]))
         except Exception as exc:
-            return Command(goto="fail", update={"error": _error_text(exc)})
+            return Command(goto="fail", update={**_RUN_RESET, "error": _error_text(exc)})
         # Reader issues (e.g. scanned PDF) travel with extraction issues so validation flags them.
         return Command(goto="extract", update={
-            "raw_text": r.raw_text, "format": r.format, "source_path": r.source_path,
+            **_RUN_RESET, "raw_text": r.raw_text, "format": r.format, "source_path": r.source_path,
             "content_hash": r.content_hash, "extraction_issues": r.issues,
         })
 
@@ -112,7 +120,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         forced = apply_guardrail(state.get("flags", []))
         if forced is None:
             return Command(goto="pay")
-        return Command(goto="log_rejection", update={"final": forced})
+        return Command(goto="log_rejection", update={"guardrail_outcome": forced})
 
     def human_review(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
         """Pause for a human decision; on resume, a human APPROVE goes straight to pay (it overrides the guardrail)."""
@@ -150,9 +158,10 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
 
     def log_rejection(state: PipelineState) -> dict:
         """Record the rejection and who made it (guardrail, human or agents); the runner persists the full state."""
-        if state.get("final"):
-            # The guardrail already wrote its forced rejection.
-            return {}
+        forced = state.get("guardrail_outcome")
+        if forced:
+            # The guardrail blocked an agent APPROVE in this run (read clears it at the start of every run).
+            return {"final": forced}
         human = state.get("human_decision")
         if human:
             final = FinalOutcome(status="REJECTED", decided_by="human",
