@@ -1,3 +1,5 @@
+"""Tests for SQLite inventory seeding and run history (save, lookup, ordering, duplicate lookups, reset).
+"""
 from decimal import Decimal
 
 from invoice_agent import db
@@ -6,12 +8,14 @@ from invoice_agent.models import FinalOutcome, Invoice
 
 
 def _conn(tmp_path):
+    """Fresh initialized DB in a temp dir (also checks parent dirs are created)."""
     conn = db.connect(tmp_path / "sub" / "app.db")
     db.init_db(conn)
     return conn
 
 
 def _state(run_id, status=None, number="INV-1", **extra):
+    """Build a minimal pipeline state for saving."""
     state = {"run_id": run_id, "invoice": Invoice(invoice_number=number, vendor="Acme", total="100.50")}
     if status:
         state["final"] = FinalOutcome(status=status, decided_by="agents", reasoning="ok")
@@ -20,6 +24,7 @@ def _state(run_id, status=None, number="INV-1", **extra):
 
 
 def test_init_seeds_inventory_idempotently(tmp_path):
+    """Seeding runs once, can repeat safely, and unknown SKUs return None."""
     conn = _conn(tmp_path)
     db.init_db(conn)
     assert db.get_inventory(conn, "GadgetX") == {"item": "GadgetX", "stock": 5, "unit_price": Decimal("750.00")}
@@ -28,6 +33,7 @@ def test_init_seeds_inventory_idempotently(tmp_path):
 
 
 def test_save_and_get_run_roundtrip(tmp_path):
+    """A saved run reads back intact; re-saving updates status but keeps created_at."""
     conn = _conn(tmp_path)
     db.save_run(conn, _state("r1", "PAID", content_hash="h1", fingerprint="f1"))
     run = db.get_run(conn, "r1")
@@ -43,6 +49,7 @@ def test_save_and_get_run_roundtrip(tmp_path):
 
 
 def test_list_runs_puts_needs_review_first(tmp_path):
+    """Runs needing human review sort above the rest."""
     conn = _conn(tmp_path)
     db.save_run(conn, _state("a", "PAID"))
     db.save_run(conn, _state("b", "NEEDS_HUMAN_REVIEW"))
@@ -51,6 +58,7 @@ def test_list_runs_puts_needs_review_first(tmp_path):
 
 
 def test_find_runs_by_invoice_number_excludes_self(tmp_path):
+    """Invoice-number lookup omits the current run (double-billing check)."""
     conn = _conn(tmp_path)
     db.save_run(conn, _state("a", "PAID", number="INV-9"))
     db.save_run(conn, _state("b", "PAID", number="INV-9"))
@@ -60,6 +68,7 @@ def test_find_runs_by_invoice_number_excludes_self(tmp_path):
 
 
 def test_find_run_by_content_hash(tmp_path):
+    """Exact-duplicate lookup by file hash."""
     conn = _conn(tmp_path)
     db.save_run(conn, _state("a", "PAID", content_hash="abc"))
     assert db.find_run_by_content_hash(conn, "abc")["run_id"] == "a"
@@ -67,6 +76,7 @@ def test_find_run_by_content_hash(tmp_path):
 
 
 def test_reset_deletes_db_files(tmp_path):
+    """reset removes both DB files and tolerates already-missing files."""
     s = Settings(var_dir=tmp_path)
     s.app_db.write_text("x")
     s.checkpoint_db.write_text("y")
