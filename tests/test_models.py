@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from invoice_agent.infra.config import load_settings
+from invoice_agent.infra.config import Settings, load_settings
 from invoice_agent.models import Invoice, VPReview
 
 
@@ -23,7 +23,10 @@ def test_vp_review_rejects_unknown_verdict():
 
 
 def test_load_settings_defaults(monkeypatch):
-    """With no env var and no .env, the model defaults to grok-3."""
+    """With no env var and no .env, the model defaults to grok-4-1-fast-non-reasoning (also on an empty XAI_MODEL)."""
     # env_file=None so the test never reads the developer's real .env.
     monkeypatch.delenv("XAI_MODEL", raising=False)
-    assert load_settings(env_file=None).xai_model == "grok-3"
+    assert load_settings(env_file=None).xai_model == "grok-4-1-fast-non-reasoning"
+    assert Settings().xai_model == "grok-4-1-fast-non-reasoning"
+    monkeypatch.setenv("XAI_MODEL", "")
+    assert load_settings(env_file=None).xai_model == "grok-4-1-fast-non-reasoning"

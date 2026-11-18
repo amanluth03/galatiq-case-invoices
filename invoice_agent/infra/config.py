@@ -13,11 +13,16 @@ SCRUTINY_THRESHOLD = Decimal("10000")
 MAX_EXTRACTION_RETRIES = 2
 
 
+# grok-3 timed out / returned HTTP 500 on the analyst's tool-calling loop in live testing;
+# this model ran the whole pipeline end to end.
+DEFAULT_XAI_MODEL = "grok-4-1-fast-non-reasoning"
+
+
 @dataclass
 class Settings:
     """Environment-driven settings; all runtime files live under var_dir."""
     xai_api_key: str | None = None
-    xai_model: str = "grok-3"
+    xai_model: str = DEFAULT_XAI_MODEL
     var_dir: Path = field(default_factory=lambda: Path("var"))
 
     @property
@@ -43,5 +48,5 @@ def load_settings(env_file: Path | None = Path(".env")) -> Settings:
         load_dotenv(env_file, override=False)
     return Settings(
         xai_api_key=os.environ.get("XAI_API_KEY") or None,
-        xai_model=os.environ.get("XAI_MODEL") or "grok-3",
+        xai_model=os.environ.get("XAI_MODEL") or DEFAULT_XAI_MODEL,
     )
