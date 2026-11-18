@@ -1,8 +1,8 @@
-{#- Home: a short explanation, the drop card (choosing a file only selects it; "Process this invoice" starts it and
+{#- The dashboard page (/dashboard): a short explanation, the drop card (choosing a file only selects it; "Process this invoice" starts it and
     opens that invoice's page) and the dashboard of every invoice: summary tiles, then a table (cards on a phone)
     with anything waiting for you first. live.js refreshes the dashboard while invoices are running. -#}
 {% extends "base.html" %}
-{% block title %}Invoices{% endblock %}
+{% block title %}Dashboard{% endblock %}
 {% block content %}
 <div class="intro">
   <h1>Invoice review</h1>
@@ -11,7 +11,7 @@
 
 {% if missing %}<div class="notice notice-warn" role="alert">That invoice wasn't found. It may have been removed when the databases were reset.</div>{% endif %}
 
-<div class="intake">
+<div class="intake" id="intake">
   <form class="dropzone" method="post" action="/upload" enctype="multipart/form-data" data-dropzone>
     <p class="dz-title">Drop an invoice here, or choose a file</p>
     <p class="hint">PDF, TXT, JSON, CSV or XML, up to 5 MB</p>

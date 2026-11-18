@@ -1,5 +1,5 @@
 {#- Shared page shell for the review screen: top bar, main container, the offline stylesheet and optional page scripts.
-    Static URLs carry a hash of the file's contents (static_url), so a browser never mixes a new page with old CSS. -#}
+    The landing page drops the top bar (its wordmark is the brand). Static URLs carry a hash of the file's contents (static_url), so a browser never mixes a new page with old CSS. -#}
 <!doctype html>
 <html lang="en">
 <head>
@@ -10,14 +10,16 @@
   <link rel="stylesheet" href="{{ static_url('styles.css') }}">
   {% block head %}{% endblock %}
 </head>
-<body>
+<body{% block body_class %}{% endblock %}>
   <a class="skip" href="#main">Skip to content</a>
+  {% block topbar %}
   <header class="topbar">
     <div class="wrap topbar-inner">
-      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Invoice review</a>
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Invoice Agent</a>
       <span class="brand-sub">Acme Corp · Accounts payable</span>
     </div>
   </header>
+  {% endblock %}
   <main id="main" class="wrap">
     {% block content %}{% endblock %}
   </main>

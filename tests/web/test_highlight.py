@@ -33,3 +33,12 @@ def test_highlight_escapes_reason_in_attribute():
     """A reason containing quotes or tags cannot break out of the data-reason attribute."""
     out = str(highlight("abc", [unc("abc", reason='"><script>')]))
     assert "<script>" not in out and "&#34;&gt;&lt;script&gt;" in out
+
+
+def test_highlight_anchors_mark_brief_snippets():
+    """A brief snippet gets its own plain mark keyed by anchor_key; one overlapping an uncertainty mark adds its key
+    to that mark instead, and a snippet not in the text is skipped."""
+    from invoice_agent.web.highlight import anchor_key
+    out = str(highlight("WidgetA x4 on 26-Jan-2O26", [unc("26-Jan-2O26")], ["WidgetA", "2O26", "nowhere"]))
+    assert f'<mark class="snip" tabindex="-1" data-anchor="{anchor_key("WidgetA")}">WidgetA</mark>' in out
+    assert f'data-anchor="{anchor_key("2O26")}">26-Jan-2O26</mark>' in out and out.count("<mark") == 2

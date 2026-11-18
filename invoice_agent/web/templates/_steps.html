@@ -1,5 +1,5 @@
-{#- The story's 7 steps. Plain divs (not <ol>/<ul>), so the step number appears exactly once ("1. Read the file")
-    and nothing gains list bullets or numbers if the stylesheet is missing. live.js rebuilds this same markup. -#}
+{#- The story's 7 steps; step 7 holds the review brief and the decision form when an invoice waits for you.
+    Plain divs (not <ol>/<ul>), so the step number appears exactly once ("1. Read the file") and nothing gains list bullets or numbers if the stylesheet is missing. live.js rebuilds this same markup. -#}
 {% set state_words = {"pending": "not started", "running": "in progress", "done": "done", "warn": "done, with warnings", "failed": "failed", "skipped": "skipped"} %}
 <div class="steps" role="list" aria-live="polite" data-live-steps>
   {% for s in story.steps %}
@@ -13,8 +13,52 @@
       </div>
       {% endif %}
       {% if s.number == 7 and story.awaiting %}
+      {% set b = story.brief %}
       <div class="decide" id="decide">
+        {% if b %}
+        {#- The review brief: why a person is needed, the agents' view (behind "See why"), what to check (ticks are
+            only for the reviewer, never saved or sent) and, right above the buttons, what each choice does. -#}
+        <section class="brief" aria-labelledby="brief-title">
+          <h2 id="brief-title" class="brief-head">{{ b.headline }}</h2>
+          {% if b.why %}
+          <div class="brief-part">
+            <h3>Why this needs you</h3>
+            {% for w in b.why %}<p class="brief-why">{{ w }}</p>{% endfor %}
+          </div>
+          {% endif %}
+          {% if b.recommended or b.summary or b.has_rounds %}
+          <details class="brief-agents">
+            <summary>See why</summary>
+            <div class="brief-agents-body">
+              {% if b.recommended %}<p><span class="label-inline">The agents lean towards {{ b.recommended }}.</span></p>
+              {% else %}<p><span class="label-inline">The agents didn't settle on a recommendation.</span></p>{% endif %}
+              {% if b.summary %}<p class="said">{{ b.summary }}</p>{% endif %}
+              {% if b.has_rounds %}<p><a href="#agents-exchange" data-jump>Read the full analyst and VP exchange</a></p>{% endif %}
+            </div>
+          </details>
+          {% endif %}
+          {% if b.checks %}
+          <div class="brief-part">
+            <h3>What to check</h3>
+            <div class="brief-checks" role="list">
+              {% for c in b.checks %}
+              <div class="bc{% if c.ok %} bc-ok{% endif %}" role="listitem">
+                {% if c.ok %}
+                <span class="bc-mark" aria-hidden="true">✓</span><span class="bc-text"><span class="sr-only">Already verified: </span>{{ c.text }}</span>
+                {% else %}
+                <input type="checkbox" id="bc-{{ loop.index }}" class="bc-box">
+                <label for="bc-{{ loop.index }}" class="bc-text">{{ c.text }}</label>
+                {% endif %}
+                {% if c.jump %}<a class="bc-jump" href="{{ c.jump.href }}" data-jump{% if c.jump.anchor %} data-anchor-key="{{ c.jump.anchor }}"{% endif %}>Show in invoice</a>{% endif %}
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+        </section>
+        {% else %}
         <p class="lede">Approving pays <strong class="num">{{ story.approve_amount }}</strong> to {{ story.vendor }} now. Rejecting logs it and nothing is paid.</p>
+        {% endif %}
         {% if error %}<div class="form-error" role="alert" id="form-error">{{ error }}</div>{% endif %}
         <form method="post" action="/invoices/{{ story.run_id }}/decision">
           {% if story.blocking %}
@@ -35,6 +79,12 @@
             <label for="note">Note for the record <span class="opt">optional</span></label>
             <textarea id="note" name="note" rows="2">{{ form.note }}</textarea>
           </div>
+          {% if b %}
+          <div class="outcomes">
+            <p><span class="label-inline">If you approve:</span> {{ b.if_approve }}</p>
+            <p><span class="label-inline">If you reject:</span> {{ b.if_reject }}</p>
+          </div>
+          {% endif %}
           <div class="actions">
             <button type="submit" name="decision" value="APPROVE" class="btn btn-approve">Approve and pay {{ story.approve_amount }}</button>
             <button type="submit" name="decision" value="REJECT" class="btn btn-reject">Reject</button>

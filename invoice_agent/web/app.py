@@ -1,7 +1,8 @@
 """The review screen at the end of the pipeline (read -> extract -> validate -> analyst/VP approval -> guardrail ->
-pay / reject / waiting for you). Home (/) has the drop card and a dashboard of every invoice; each invoice has its own
-page (/invoices/<id>) telling its story live, step by step, with the full invoice details under it. Files run in
-background threads, and a run paused for a person is approved or rejected on its page (via runner.resume_review).
+pay / reject / waiting for you). The landing page (/) says what the agent does; the dashboard (/dashboard) has the
+drop card and every invoice; each invoice has its own page (/invoices/<id>) telling its story live, step by step, with
+the full invoice details under it. Files run in background threads, and a run paused for a person is approved or
+rejected on its page (via runner.resume_review), under a review brief saying why it needs them and what to check.
 Everything shown is plain language for a PE analyst/VP: dollars, risks and reasons, never codes or raw JSON.
 """
 import hashlib
@@ -34,7 +35,7 @@ from invoice_agent.web.story import (
     NOT_STARTED, QUEUED, STATUS_LABELS, blocking_summary, build_story, display_name, lookup_text, money,
     plain_message, story_json,
 )
-from invoice_agent.web.views import dashboard_view, details_view, sort_rows
+from invoice_agent.web.views import brief_view, dashboard_view, details_view, sort_rows
 
 log = logging.getLogger(RUN_LOGGER)
 
@@ -43,6 +44,8 @@ HERE = Path(__file__).parent
 SAMPLES_DIR = HERE.parent.parent / "data" / "invoices"
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# Earlier addresses of the dashboard (it used to be the home page), kept working by redirecting to /dashboard.
+OLD_DASHBOARD_URLS = ("/home", "/invoices")
 # Room for the multipart envelope (boundaries, headers) around a file of the maximum size.
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
 MAX_STEM_CHARS = 100
@@ -139,19 +142,24 @@ def list_view(rows: list[dict], selected: str | None) -> list[dict]:
 
 
 def story_view(conn: sqlite3.Connection, row: dict) -> dict:
-    """Everything an invoice page shows: header, the 7 steps, the decision panel's facts and the invoice details."""
+    """Everything an invoice page shows: header, the 7 steps, the decision panel's facts (with the review brief when
+    it waits for a person) and the invoice details."""
     state = row_state(row)
     live = row_status(row) == "PROCESSING"
     if live and row.get("stage") in NOT_STARTED:
         # A re-run's row still holds the previous result until the first step finishes: show none of it.
         state = {"run_id": row["run_id"]}
     inv, flags = state.get("invoice"), state.get("flags") or []
+    awaiting = row_status(row) == "NEEDS_HUMAN_REVIEW"
+    brief = brief_view(state) if awaiting else None
+    # The brief's snippets are marked in the original document so "Show in invoice" can jump to them.
+    anchors = [c["snippet"] for c in brief["checks"] if c["jump"] and c["jump"]["anchor"]] if brief else []
     return {
         "run_id": row["run_id"], "live": live, "status": row_status(row).lower(), "label": status_label(row),
         "file_name": display_name(row["run_id"], row["source_path"]) or row["run_id"],
         "steps": run_story(conn, row),
-        "details": details_view(state),
-        "awaiting": row_status(row) == "NEEDS_HUMAN_REVIEW",
+        "details": details_view(state, anchors),
+        "awaiting": awaiting, "brief": brief,
         "vendor": (inv.vendor if inv else None) or "the vendor",
         "approve_amount": money(inv.total, inv.currency) if inv else "",
         "blocking": [plain_message(f.message) for f in flags if f.severity == "must_reject"],
@@ -160,7 +168,7 @@ def story_view(conn: sqlite3.Connection, row: dict) -> dict:
 
 
 def home_view(conn: sqlite3.Connection, rows: list[dict]) -> dict:
-    """The home dashboard for every run: summary tiles and one table row each."""
+    """The dashboard of every run: summary tiles and one table row each."""
     states = {r["run_id"]: row_state(r) for r in rows}
     running = {r["run_id"]: running_title(run_story(conn, r)) for r in rows if row_status(r) == "PROCESSING"}
     return dashboard_view(rows, states, running)
@@ -324,7 +332,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
     def render_home(request: Request, conn: sqlite3.Connection, status_code: int = 200, **extra) -> HTMLResponse:
-        """Home: the drop card and the dashboard of every invoice."""
+        """The dashboard page: the drop card and the dashboard of every invoice."""
         rows = db.list_runs(conn)
         context = {"board": home_view(conn, rows), "sample_count": len(invoice_files(SAMPLES_DIR)),
                    "missing": False, **extra}
@@ -338,7 +346,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return render(request, "invoice.html", context, status_code)
 
     def not_found(request: Request, conn: sqlite3.Connection) -> HTMLResponse:
-        """A friendly 404: the home page with a notice that the invoice wasn't found."""
+        """A friendly 404: the dashboard with a notice that the invoice wasn't found."""
         return render_home(request, conn, 404, missing=True)
 
     @app.middleware("http")
@@ -361,9 +369,20 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return response
 
     @app.get("/", response_class=HTMLResponse)
-    def home(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
-        """Home: the drop card and the dashboard of every invoice (waiting for you first, then running, then newest)."""
+    def landing(request: Request):
+        """The landing page: what the agent does, and the way in (process an invoice, or the dashboard)."""
+        return render(request, "landing.html", {})
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
+        """The drop card and the dashboard of every invoice (waiting for you first, then running, then newest)."""
         return render_home(request, conn)
+
+    for old in OLD_DASHBOARD_URLS:
+        @app.get(old, include_in_schema=False)
+        def old_dashboard():
+            """An old dashboard address: send the browser to /dashboard."""
+            return RedirectResponse("/dashboard", status_code=301)
 
     @app.get("/invoices/{run_id}", response_class=HTMLResponse)
     def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0,
@@ -441,7 +460,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 jobs.append((run_id, path, digest))
         if jobs:
             start_jobs(jobs, settings.batch_workers)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/invoices/{run_id}/decision", response_class=HTMLResponse)
     def decide(request: Request, run_id: str, decision: str = Form(""), note: str = Form(""),

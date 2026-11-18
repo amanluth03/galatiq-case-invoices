@@ -123,7 +123,7 @@ def test_main_page_offers_intake_and_lists_running_run(conn, tmp_path):
     client, _ = make_client(conn, tmp_path)
     db.create_pending_run(conn, "r1", "var/uploads/r1_invoice.txt")
     db.set_stage(conn, "r1", "extract")
-    html = client.get("/").text
+    html = client.get("/dashboard").text
     assert 'action="/upload"' in html and 'enctype="multipart/form-data"' in html
     assert "Run all 20 sample invoices" in html
     assert ">Running<" in html and "invoice.txt" in html
@@ -165,10 +165,10 @@ def test_reupload_of_paid_file_opens_existing_run(conn, tmp_path):
 
 
 def test_process_samples_runs_every_sample(conn, tmp_path):
-    """The samples button 303s to the main page and processes every supported file in data/invoices, none left PROCESSING."""
+    """The samples button 303s to the dashboard and processes every supported file in data/invoices, none left PROCESSING."""
     client, app = make_client(conn, tmp_path)
     resp = client.post("/process-samples")
-    assert resp.status_code == 303 and resp.headers["location"] == "/"
+    assert resp.status_code == 303 and resp.headers["location"] == "/dashboard"
     wait_for_jobs(app)
     expected = sum(1 for p in web_app.SAMPLES_DIR.iterdir() if p.suffix.lower() in SUPPORTED_SUFFIXES)
     runs = db.list_runs(conn)

@@ -51,7 +51,7 @@ def test_home_dashboard_shows_tiles_and_waiting_first(conn):
     seed(conn, "x1", "REJECTED", "INV-REJ", "750.00",
          [Flag(severity="must_reject", code="unknown_item", message="Gizmo isn't in inventory", field_path="items[0]")])
     client, *_ = client_for(conn, [])
-    html = client.get("/").text
+    html = client.get("/dashboard").text
     board = html[html.index("data-dashboard"):]
     # The review run is the oldest, yet listed first; finished runs follow newest first.
     assert board.index("INV-REVIEW.txt") < board.index("INV-REJ.txt") < board.index("INV-PAID.txt")
@@ -76,7 +76,7 @@ def test_invoice_page_has_sidebar_and_way_home(conn):
 def test_empty_main_page_shows_drop_zone_and_hint(conn):
     """A fresh start shows the drop card, the samples button and a hint which file to try, and no tiles yet."""
     client, *_ = client_for(conn, [])
-    html = client.get("/").text
+    html = client.get("/dashboard").text
     assert "Drop an invoice here, or choose a file" in html and 'type="file"' in html
     assert "Run all 20 sample invoices" in html and "invoice_1010.txt" in html
     assert 'class="tiles"' not in html and "data-live-run" not in html
@@ -254,7 +254,7 @@ def test_invoice_details_show_fields_flags_and_the_full_exchange(conn):
     assert "What the reader extracted" in details and "Invoice number" in details and "Line items" in details
     assert "WidgetA" in details and "Unit price" in details
     assert "What the checks found" in details
-    assert '<details class="card timeline">' in details and "Round 3" in details and "sent it back" in details
+    assert '<details class="card timeline" id="agents-exchange">' in details and "Round 3" in details and "sent it back" in details
 
 
 def test_rule_rejected_invoice_page_shows_flags_and_no_rounds(conn):
@@ -271,7 +271,7 @@ def test_static_urls_are_versioned_and_revalidated(conn):
     so a browser never pairs a new page with an old cached stylesheet."""
     from invoice_agent.web.app import static_versions
     client, *_ = client_for(conn, [])
-    html = client.get("/").text
+    html = client.get("/dashboard").text
     versions = static_versions()
     assert f'/static/styles.css?v={versions["styles.css"]}"' in html
     assert f'/static/live.js?v={versions["live.js"]}"' in html
@@ -284,7 +284,7 @@ def test_page_reads_right_without_css(conn):
     step numbers come only from the text (no <ol> or bullet lists in the story)."""
     client, deps, graph, _ = client_for(conn, [make_extracted()])
     state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
-    home = client.get("/").text
+    home = client.get("/dashboard").text
     file_input = home[home.index('<input id="upload-file"'):]
     file_input = file_input[:file_input.index(">")]
     assert 'style="position:absolute;width:1px;height:1px' in file_input and "opacity:0" in file_input
@@ -300,3 +300,93 @@ def test_running_page_refreshes_without_javascript(conn):
     db.save_progress(conn, "r1", "read", {"run_id": "r1", "raw_text": "line", "format": "txt"})
     html = client.get("/invoices/r1").text
     assert '<noscript><meta http-equiv="refresh" content="3"></noscript>' in html
+
+
+def test_landing_page_has_wordmark_buttons_and_steps(conn):
+    """The landing page (/) shows the Invoice Agent wordmark, its one sentence, the two ways in (Process an invoice
+    to the drop card, Dashboard) and the 4 stages; it has no dashboard or upload form of its own."""
+    client, *_ = client_for(conn, [])
+    html = client.get("/").text
+    assert "Invoice Agent</h1>" in html and "asks you when it matters" in html
+    assert 'href="/dashboard#intake">Process an invoice</a>' in html and 'href="/dashboard">Dashboard</a>' in html
+    for name in ("Read", "Check", "Debate", "Decide"):
+        assert f'class="ls-name">{name}<' in html
+    assert "data-dashboard" not in html and 'action="/upload"' not in html
+
+
+def test_dashboard_moved_and_old_urls_redirect(conn):
+    """The dashboard lives at /dashboard; its old addresses redirect there, and an invoice page links back to it
+    ("Process another invoice") while the header brand goes to the landing page."""
+    seed(conn, "p1", "PAID", "INV-PAID", "5000.00")
+    client, *_ = client_for(conn, [])
+    assert "data-dashboard" in client.get("/dashboard").text
+    for old in ("/home", "/invoices"):
+        resp = client.get(old)
+        assert resp.status_code == 301 and resp.headers["location"] == "/dashboard"
+    page = client.get("/invoices/p1").text
+    assert 'href="/dashboard">← Process another invoice' in page and 'class="brand" href="/"' in page
+    assert "data-dashboard" in client.get("/invoices/nope").text
+
+
+def test_waiting_invoice_shows_review_brief_above_the_buttons(conn):
+    """A run waiting for a person shows the review brief in step 7: why it needs you, the agents' view behind
+    "See why" (linking to the full exchange), what to check, and what each choice does right above the buttons."""
+    client, deps, graph, _ = client_for(conn, [make_extracted()], send_back=True)
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    html = client.get(f"/invoices/{state['run_id']}").text
+    brief = html[html.index('class="brief"'):html.index('class="actions"')]
+    assert "Why this needs you" in brief and "See why" in brief and 'href="#agents-exchange"' in brief
+    assert "What to check" in brief and "If you approve:" in brief and "If you reject:" in brief
+    assert brief.index("What to check") < brief.index("<form") < brief.index("If you approve:")
+    assert "Approve and pay $5,000.00" in html
+
+
+def test_finished_invoice_has_no_review_brief(conn):
+    """A paid invoice has no brief and no decision form."""
+    client, deps, graph, _ = client_for(conn, [make_extracted()])
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    html = client.get(f"/invoices/{state['run_id']}").text
+    assert 'class="brief"' not in html and "What to check" not in html and 'name="decision"' not in html
+
+
+def stub_brief(monkeypatch, **overrides):
+    """Make the review screen use a fixed brief (any field overridable), as build_review_brief would return."""
+    from invoice_agent.utils.review_brief import CheckItem, ReviewBrief
+    from invoice_agent.web import views
+    fields = {"headline": "Waiting for you: $100.00 to Widgets Inc.", "why": ["The agents couldn't agree."],
+              "agents_recommended": None, "agents_summary": None, "checks": [CheckItem(text="All else matches", ok=True)],
+              "if_approve": "$100.00 is paid.", "if_reject": "Nothing is paid."}
+    brief = ReviewBrief(**{**fields, **overrides})
+    monkeypatch.setattr(views, "build_review_brief", lambda state: brief)
+
+
+def test_review_brief_text_is_escaped(conn, monkeypatch):
+    """Brief text built from vendor data is shown as text, never run as markup."""
+    from invoice_agent.utils.review_brief import CheckItem
+    seed(conn, "r1", "NEEDS_HUMAN_REVIEW", "INV-REVIEW", "100.00")
+    stub_brief(monkeypatch, headline="<script>alert(1)</script>", why=["<b>why</b>"],
+               agents_summary="<img src=x>", checks=[CheckItem(text="<i>check</i>")], if_approve="<u>pay</u>")
+    html = client_for(conn, [])[0].get("/invoices/r1").text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html and "<script>alert(1)" not in html
+    for raw in ("<b>why</b>", "<img src=x>", "<i>check</i>", "<u>pay</u>"):
+        assert raw not in html
+
+
+def test_review_brief_checks_link_to_the_document(conn, monkeypatch):
+    """Each open check is a checkbox row; one whose snippet is in the document links to a mark carrying the same
+    anchor key, one with only a line's field path links to that line's row, and a verified item shows a check mark."""
+    from invoice_agent.utils.review_brief import CheckItem
+    from invoice_agent.web.highlight import anchor_key
+    seed(conn, "r1", "NEEDS_HUMAN_REVIEW", "INV-REVIEW", "100.00")
+    stub_brief(monkeypatch, agents_recommended="APPROVE", agents_summary="Fine overall.", checks=[
+        CheckItem(text="Check the number", field_path="invoice_number", snippet="INV-REVIEW"),
+        CheckItem(text="Check line 1", field_path="items[0].unit_price", snippet="not in the text"),
+        CheckItem(text="All other lines match", ok=True)])
+    html = client_for(conn, [])[0].get("/invoices/r1").text
+    key = anchor_key("INV-REVIEW")
+    assert f'data-anchor-key="{key}">Show in invoice' in html and f'data-anchor="{key}">INV-REVIEW</mark>' in html
+    assert 'href="#line-0" data-jump>Show in invoice' in html and 'id="line-0"' in html
+    assert html.count('type="checkbox"') == 2 and 'class="bc bc-ok"' in html
+    assert "The agents lean towards approving." in html and "Fine overall." in html
+    # No rounds in this run, so there's no exchange to link to.
+    assert 'href="#agents-exchange"' not in html

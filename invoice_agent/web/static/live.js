@@ -2,9 +2,10 @@
    - Invoice page: a running story (data-live-run) polls /invoices/<id>/status every second and redraws its 7 steps.
      When the run finishes, the pill is updated and the page reloads once so the finished page (decision panel,
      full details) is server-rendered.
-   - Home: choosing or dropping a file only selects it ("<name> ready"); "Process this invoice" starts it. While
+   - Dashboard (/dashboard): choosing or dropping a file only selects it ("<name> ready"); "Process this invoice" starts it. While
      invoices run, the dashboard is refreshed from the server every 2 seconds. Each dashboard row opens its invoice.
-   - Original document: hovering, focusing or tapping a highlight shows why the reader was unsure, in a tooltip. */
+   - Original document: hovering, focusing or tapping a highlight shows why the reader was unsure, in a tooltip.
+   - Review brief: "Show in invoice" scrolls to that spot (opening anything collapsed around it) and lights it up. */
 (function () {
   "use strict";
 
@@ -109,13 +110,13 @@
   var live = document.querySelector("[data-live-run]");
   if (live) watch(live);
 
-  /* Home dashboard: while invoices run, swap in the server's fresh dashboard (parsed, never run as script). */
+  /* Dashboard: while invoices run, swap in the server's fresh dashboard (parsed, never run as script). */
   var boardTimer = null;
   function refreshBoard() {
     var board = document.querySelector("[data-dashboard]");
     if (!board || !board.hasAttribute("data-live")) return;
     boardTimer = setTimeout(function () {
-      fetch("/", { cache: "no-store" })
+      fetch("/dashboard", { cache: "no-store" })
         .then(function (resp) {
           if (!resp.ok) throw new Error("HTTP " + resp.status);
           return resp.text();
@@ -228,6 +229,42 @@
     if (m) showTip(m); else hideTip();
   });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") hideTip(); });
+
+  /* Review brief links ("Show in invoice", "Read the full analyst and VP exchange"): find the spot (a document mark
+     by its data-anchor key, else the element the link names), open any collapsed <details> around or at it, scroll it
+     into view, focus it and light it up for a few seconds. Without JavaScript the plain link still goes nearby. */
+  var lit = null;
+  var litTimer = null;
+  function jumpTarget(link) {
+    var key = link.getAttribute("data-anchor-key");
+    if (key) {
+      var marks = document.querySelectorAll(".doc mark[data-anchor]");
+      for (var i = 0; i < marks.length; i++) {
+        if ((" " + marks[i].getAttribute("data-anchor") + " ").indexOf(" " + key + " ") >= 0) return marks[i];
+      }
+    }
+    var href = link.getAttribute("href") || "";
+    return href.charAt(0) === "#" ? document.getElementById(href.slice(1)) : null;
+  }
+  document.addEventListener("click", function (e) {
+    var link = e.target.closest && e.target.closest("a[data-jump]");
+    if (!link) return;
+    var target = jumpTarget(link);
+    if (!target) return;
+    e.preventDefault();
+    for (var d = target; d; d = d.parentElement) {
+      if (d.tagName === "DETAILS") d.open = true;
+    }
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    var smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    target.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+    target.focus({ preventScroll: true });
+    if (lit) lit.classList.remove("jump-hit");
+    if (litTimer) clearTimeout(litTimer);
+    lit = target;
+    target.classList.add("jump-hit");
+    litTimer = setTimeout(function () { target.classList.remove("jump-hit"); }, 4000);
+  });
   // Scrolling the page or the document pane moves the highlight: keep the box with it.
   document.addEventListener("scroll", function () { if (tipFor) showTip(tipFor); }, true);
 })();

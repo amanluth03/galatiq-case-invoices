@@ -1,6 +1,7 @@
 """View models for the review screen's pages, already formatted for display (no raw codes or JSON reach a template):
 the home dashboard (summary tiles and the table of every invoice) and an invoice page's "Invoice details" section
-(original document, extracted fields, flags, over-$10K checklist, open questions and the analyst/VP exchange).
+(original document, extracted fields, flags, over-$10K checklist, open questions and the analyst/VP exchange), and
+the review brief shown above the approve/reject buttons when an invoice waits for a person.
 """
 import re
 from decimal import Decimal, InvalidOperation
@@ -8,7 +9,8 @@ from decimal import Decimal, InvalidOperation
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.models import Flag, Uncertainty
 from invoice_agent.utils.formatting import money, nice_date, quantity
-from invoice_agent.web.highlight import highlight
+from invoice_agent.utils.review_brief import build_review_brief
+from invoice_agent.web.highlight import anchor_key, highlight
 from invoice_agent.web.story import (
     NOT_STARTED, QUEUED, STATUS_LABELS, blocking_summary, display_name, nice_time, plain_message, short,
 )
@@ -159,8 +161,9 @@ def dashboard_view(rows: list[dict], states: dict[str, dict], running_titles: di
 
 # ---------- invoice details ----------
 
-def details_view(state: dict) -> dict:
-    """The "Invoice details" section under an invoice's story: every part that exists so far (live runs fill in)."""
+def details_view(state: dict, anchors: list[str] = ()) -> dict:
+    """The "Invoice details" section under an invoice's story: every part that exists so far (live runs fill in).
+    anchors: source snippets the review brief links to, marked in the original document so its links can jump there."""
     inv, approval = state.get("invoice"), state.get("approval")
     flags, uncs = state.get("flags") or [], state.get("uncertainties") or []
     currency = inv.currency if inv else "USD"
@@ -180,7 +183,7 @@ def details_view(state: dict) -> dict:
         if key in ("shipping", "notes") and value is None and key not in by_path:
             continue  # optional fields most invoices don't have: hide rather than show a row of "n/a"
         shown = money(value, currency) if kind == "money" else nice_date(value) if kind == "date" else (value or "n/a")
-        fields.append({"label": label, "value": shown, "money": kind == "money", "unc": unc_view(key)})
+        fields.append({"key": key, "label": label, "value": shown, "money": kind == "money", "unc": unc_view(key)})
 
     lines = []
     for i, it in enumerate(inv.items if inv else []):
@@ -221,9 +224,47 @@ def details_view(state: dict) -> dict:
     marks = [u.model_copy(update={"reason": humanize_reason(u)}) for u in uncs if u.confidence != "high"]
     final = state.get("final")
     return {
-        "source": highlight(raw_text, marks) if raw_text else None,
+        "source": highlight(raw_text, marks, anchors) if raw_text else None,
         "uncertain_count": len(marks), "read": raw_text is not None, "extracted": inv is not None,
         "validated": state.get("fingerprint") is not None, "errored": bool(final and final.status == "ERROR"),
         "fields": fields, "lines": lines, "flag_groups": groups, "checklist": checklist,
         "open_questions": approval.open_questions if approval else [], "rounds": rounds,
+    }
+
+
+# ---------- review brief ----------
+
+def _jump(field_path: str | None, snippet: str | None, raw_text: str | None, inv) -> dict | None:
+    """Where a check's "Show in invoice" link goes: its snippet in the original document when that text is there,
+    else the field's row in the extracted fields or line items; None when there's nothing to point at."""
+    if snippet and raw_text and snippet in raw_text:
+        return {"href": "#doc-title", "anchor": anchor_key(snippet)}
+    if not field_path or inv is None:
+        return None
+    m = re.match(r"items\[(\d+)\]", field_path)
+    if m:
+        return {"href": f"#line-{m.group(1)}", "anchor": None} if int(m.group(1)) < len(inv.items) else None
+    # Only header fields that have a row (shipping and notes are hidden when empty).
+    if any(key == field_path for key, _, _ in FIELDS) and (
+            field_path not in ("shipping", "notes") or getattr(inv, field_path, None) is not None):
+        return {"href": f"#field-{field_path}", "anchor": None}
+    return None
+
+
+def brief_view(state: dict) -> dict | None:
+    """The review brief for an invoice waiting for a person, ready for the template (None when not waiting):
+    headline, why, the agents' view, what to check (each with its "Show in invoice" target) and what each choice does."""
+    brief = build_review_brief(state)
+    if brief is None:
+        return None
+    inv, raw_text = state.get("invoice"), state.get("raw_text")
+    words = {"APPROVE": "approving", "REJECT": "rejecting"}
+    checks = [{"text": c.text, "ok": c.ok, "snippet": c.snippet,
+               "jump": None if c.ok else _jump(c.field_path, c.snippet, raw_text, inv)}
+              for c in brief.checks]
+    return {
+        "headline": brief.headline, "why": brief.why,
+        "recommended": words.get(brief.agents_recommended or ""), "summary": brief.agents_summary,
+        "has_rounds": bool(state.get("approval") and state["approval"].rounds),
+        "checks": checks, "if_approve": brief.if_approve, "if_reject": brief.if_reject,
     }

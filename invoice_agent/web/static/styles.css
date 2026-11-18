@@ -459,3 +459,60 @@ textarea:focus-visible { outline-offset: 0; }
   .c-why { grid-area: why; }
   .c-time { grid-area: time; }
 }
+
+/* ---------- review brief (inside the decision panel, above the approve/reject form) ---------- */
+.brief { display: grid; gap: 14px; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.brief-head { font-size: 1.1rem; overflow-wrap: anywhere; }
+.brief-part h3 { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+.brief-why { color: var(--ink-2); overflow-wrap: anywhere; }
+.brief-why + .brief-why { margin-top: 4px; }
+.brief-agents summary { cursor: pointer; color: var(--accent); font-weight: 600; width: fit-content; }
+.brief-agents-body { margin-top: 8px; padding: 10px 14px; border-left: 2px solid var(--line-strong); display: grid; gap: 6px; }
+.brief-checks { display: grid; gap: 8px; }
+.bc {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 4px 10px; align-items: start;
+  padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+}
+.bc-box { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+.bc-text { overflow-wrap: anywhere; cursor: pointer; }
+.bc-box:checked + .bc-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.bc-ok { background: var(--paid-bg); border-color: transparent; }
+.bc-ok .bc-text { cursor: default; color: var(--ink); }
+.bc-mark {
+  width: 18px; height: 18px; margin-top: 2px; border-radius: 50%; display: grid; place-items: center;
+  font-size: .7rem; font-weight: 700; color: var(--paid); background: var(--surface);
+}
+.bc-jump { font-size: .85rem; font-weight: 600; white-space: nowrap; }
+@media (max-width: 560px) { .bc-jump { grid-column: 2 / -1; } }
+.outcomes { display: grid; gap: 4px; margin-bottom: 14px; color: var(--ink-2); overflow-wrap: anywhere; }
+/* "Show in invoice" landed here: a strong ring that fades after a few seconds (live.js removes the class). */
+mark.snip { background: transparent; padding: 0; }
+.jump-hit { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+mark.jump-hit { background: var(--conf-medium); }
+tr.jump-hit { outline-offset: -3px; }
+
+/* ---------- landing page (/): wordmark, one sentence, two buttons, the 4 stages ---------- */
+.landing-page main.wrap { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding-top: 48px; padding-bottom: 48px; }
+.landing { width: 100%; max-width: 760px; display: grid; justify-items: center; text-align: center; gap: 20px; }
+.wordmark {
+  display: inline-flex; align-items: center; gap: 14px;
+  font-size: clamp(2.4rem, 8vw, 4rem); font-weight: 700; letter-spacing: -0.03em; line-height: 1.05;
+}
+.wordmark .brand-mark { width: .5em; height: .5em; border-radius: .12em; }
+.landing-lede { max-width: 34em; font-size: 1.15rem; color: var(--ink-2); }
+.landing-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 8px; }
+.landing-actions .btn { text-decoration: none; padding: 12px 22px; }
+.landing-steps {
+  margin-top: 40px; width: 100%; display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding-top: 24px; border-top: 1px solid var(--line); text-align: left;
+}
+.ls { display: grid; align-content: start; gap: 2px; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; align-items: baseline; }
+.ls-num { font-size: .8rem; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ls-name { font-weight: 650; }
+.ls-line { grid-column: 2; color: var(--muted); font-size: .85rem; }
+@media (max-width: 720px) { .landing-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 420px) {
+  .landing-steps { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .landing-actions { width: 100%; }
+  .landing-actions .btn { flex: 1 1 100%; text-align: center; }
+}

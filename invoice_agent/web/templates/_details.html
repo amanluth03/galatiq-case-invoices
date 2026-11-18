@@ -28,7 +28,7 @@
         <table class="kv">
           <tbody>
             {% for f in d.fields %}
-            <tr{% if f.unc %} class="tint conf-{{ f.unc.confidence }}"{% endif %}>
+            <tr id="field-{{ f.key }}"{% if f.unc %} class="tint conf-{{ f.unc.confidence }}"{% endif %}>
               <th scope="row">{{ f.label }}</th>
               <td{% if f.money %} class="num"{% endif %}>{{ f.value }}
                 {% if f.unc %}
@@ -51,7 +51,7 @@
             <thead><tr><th scope="col">Item</th><th scope="col" class="num">Qty</th><th scope="col" class="num">Unit price</th><th scope="col" class="num">Line total</th></tr></thead>
             <tbody>
               {% for l in d.lines %}
-              <tr{% if l.severity %} class="line-{{ l.severity }}"{% endif %}>
+              <tr id="line-{{ loop.index0 }}"{% if l.severity %} class="line-{{ l.severity }}"{% endif %}>
                 <td{% if l.unc.name %} class="tint conf-{{ l.unc.name.confidence }}"{% endif %}>
                   <span class="item-name">{{ l.name }}</span>
                   {% if l.sku %}<span class="item-sub">Matched to {{ l.sku }}</span>{% endif %}
@@ -120,7 +120,7 @@
   {% endif %}
 
   {% if d.rounds %}
-  <details class="card timeline">
+  <details class="card timeline" id="agents-exchange">
     <summary><span class="summary-title">How the agents decided</span> <span class="hint">{{ d.rounds | length }} round{{ "s" if d.rounds | length != 1 }} between the analyst and the VP</span></summary>
     <div class="rounds">
       {% for r in d.rounds %}

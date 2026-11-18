@@ -26,9 +26,9 @@ Requires Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and an xAI API key.
 That's it. The script:
 1. creates a Python environment in `.venv` and installs everything (first run only, about a minute),
 2. asks for your xAI API key if `.env` doesn't have one yet (saved to `.env`, which git ignores),
-3. starts the review screen empty (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
+3. starts the review screen empty (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser, where a simple "Invoice Agent" landing page offers **Process an invoice** and **Dashboard** buttons. Press **Ctrl+C** to stop it.
 
-Once it's open, press **Choose a file** and pick one from `data/invoices/` (choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its own page opens and the story fills in step by step as it happens (about 20 seconds). Try `invoice_1010.txt` to see a person step in. **Process another invoice** goes back home. **Run all 20 sample invoices** processes the whole set (about 5 minutes, 5 at a time) and fills the dashboard, which updates while they run.
+Once it's open, press **Process an invoice** (it takes you to the drop card on `/dashboard`), press **Choose a file** and pick one from `data/invoices/` (choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its own page opens and the story fills in step by step as it happens (about 20 seconds). Try `invoice_1010.txt` to see a person step in. **Process another invoice** goes back to the drop card. **Run all 20 sample invoices** processes the whole set (about 5 minutes, 5 at a time) and fills the dashboard, which updates while they run.
 
 | Variation | What it does |
 |---|---|
@@ -52,7 +52,7 @@ cp .env.example .env             # only if ./start hasn't created it; put your k
 | `python main.py --reset` | Wipe run history, results and checkpoints (inventory is re-seeded) for a clean demo; combine with the other flags |
 | `python main.py --serve` | Start the review screen at **http://127.0.0.1:8000** |
 
-The review screen has a home page and one page per invoice. The home page (`/`) has the drop card and a dashboard of every invoice. Tiles: **Waiting for you** (count and dollars at stake), **Paid** dollars, **Rejected** dollars, **Duplicates**, **Errors** and **Running**. The table shows file, vendor, amount, status, a one-line why and the time, with waiting invoices first, then running, then newest. Each invoice opens its own page (`/invoices/<id>`) with the live 7-step story, the decision panel when it waits for you, an **Invoice details** section, and the Invoices list beside it.
+The review screen has a landing page, a dashboard and one page per invoice. The landing page (`/`) is a simple "Invoice Agent" page with **Process an invoice** and **Dashboard** buttons. The dashboard (`/dashboard`) has the drop card and a dashboard of every invoice. Tiles: **Waiting for you** (count and dollars at stake), **Paid** dollars, **Rejected** dollars, **Duplicates**, **Errors** and **Running**. The table shows file, vendor, amount, status, a one-line why and the time, with waiting invoices first, then running, then newest. Each invoice opens its own page (`/invoices/<id>`) with the live 7-step story, the decision panel (with the review brief below) when it waits for you, an **Invoice details** section, and the Invoices list beside it.
 
 The 7 steps: **read the file**, **the ingestion agent read it** (vendor, total, items, due date and anything it was unsure about), **checked against inventory and rules** (each finding marked blocking, needs a look or FYI), **the analyst agent** (its recommendation and reasoning, and what it is looking up while it works), **the VP agent** (agrees, or sends it back for another round), **the guardrail** (which hard rule, if any, decides) and **the decision** (paid, rejected, duplicate, error, or **waiting for you**, with Approve and Reject right there). If a hard rule already decides the invoice, steps 4 and 5 read "Skipped: a hard rule already decides this invoice, so the agents weren't needed." and step 6 names the rule.
 
@@ -153,7 +153,7 @@ AI is used only where judgment is needed: reading messy documents, and weighing 
 | `invoice_agent/runner.py` | Runs files through the graph (batches in parallel, timeout retry), re-run policy, saving results, resuming reviews |
 | `invoice_agent/models.py` | Shared Pydantic models and graph state |
 | `invoice_agent/agents/` | Everything that calls Grok: `ingestion/`, `analyst/`, `vp/` (prompt + agent each), `approval/` (loop, policy, tools, briefing), `llm.py` |
-| `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `payments.py` |
+| `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `review_brief.py` (the human-review brief), `payments.py` |
 | `invoice_agent/infra/` | `config.py` (settings and business knobs), `db.py` (SQLite inventory + run history), `logging_setup.py` |
 | `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs and their live progress), `views.py` (dashboard and invoice-details view models), `story.py` (the 7-step story builder, one for live and finished invoices), `security.py`, `highlight.py`, `templates/` (`home.html`, `invoice.html`, `_dashboard.html`, `_steps.html`, `_details.html`, `base.html`, `message.html`), `static/` |
 | `tests/` | Mirrors the package; offline tests use scripted fake agents |
@@ -212,11 +212,19 @@ Paying a vendor is exactly that kind of action: hard to undo, and it needs sign-
 - An invoice's price, total or currency differs from Acme's records (and no hard rule is broken), whether the agents recommended APPROVE or REJECT.
 - An amount isn't printed anywhere on the invoice.
 
-**What the reviewer sees and does.** The invoice's story ends at "Waiting for you": what the ingestion agent read (the original document with the uncertain spots highlighted is one click away), what the checks found, each round of the analyst and VP's argument, why the guardrail sent it to a person, and the agents' recommendation. They approve (which pays the shown amount) or reject, with a note, right in that step. Approving over a hard rule needs a written justification. The human decision is final.
+**What the reviewer sees and does.** The invoice's story ends at "Waiting for you": what the ingestion agent read (the original document with the uncertain spots highlighted is one click away), what the checks found, each round of the analyst and VP's argument, why the guardrail sent it to a person, and the agents' recommendation. They approve (which pays the shown amount) or reject, with a note, right in that step.
+
+Above the buttons, the decision step shows a short **review brief** so the reviewer knows what to do without reading the whole story:
+- **Why this needs you:** the concrete difference, for example WidgetA charged $300.00 vs Acme's $250.00.
+- **See why:** the agents' recommendation and summary, linking to the full exchange.
+- **What to check:** a short checklist of exactly what to verify. Each item has **Show in invoice**, which jumps to and highlights the spot in the original document. The last line says what already matches.
+- **What happens next:** what approving does (the amount is paid to the vendor) and what rejecting does (nothing is paid; the rejection is logged with the reviewer's note).
+
+The brief is built by plain code from the flags and the agents' notes, with no extra AI call, so it appears instantly and reads the same every time. Approving over a hard rule needs a written justification. The human decision is final.
 
 **How it works.** The graph pauses at a LangGraph `interrupt` and its state is saved in a SQLite checkpointer; the run resumes from the review screen when the reviewer answers. The CLI never blocks: a paused invoice ends the run as `NEEDS_HUMAN_REVIEW`.
 
-**Try it.** Run `./start`, press **Choose a file** and pick `data/invoices/invoice_1010.txt` (a rush fee changes the price; choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its page opens with the story filling in live and it stops at "Waiting for you", where you approve or reject. `data/invoices/invoice_1014.xml` (billed in EUR) works too. **Process another invoice** goes back home.
+**Try it.** Run `./start`, press **Choose a file** and pick `data/invoices/invoice_1010.txt` (a rush fee changes the price; choosing only selects it: "invoice_1010.txt ready"), then press **Process this invoice**. Its page opens with the story filling in live and it stops at "Waiting for you". The brief there says WidgetA is charged $300.00 vs Acme's $250.00 (the rush fee) and lists what to check; press **Show in invoice** to jump to the highlighted line in the original document, then approve or reject. `data/invoices/invoice_1014.xml` (billed in EUR) works too. **Process another invoice** goes back to the drop card.
 
 ## Safety and design decisions
 
