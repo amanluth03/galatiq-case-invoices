@@ -69,7 +69,9 @@ flowchart TD
     ingest --> validate["Validate<br/><i>Code: checks stock, prices, math, duplicates</i>"]
     validate --> dup{"Duplicate?"}
     dup -- "Yes" --> stop(["Marked duplicate, not paid"])
-    dup -- "No" --> analyst
+    dup -- "No" --> rule{"Hard rule broken?"}
+    rule -- "Yes" --> reject
+    rule -- "No" --> analyst
 
     subgraph review["Analyst and VP review, up to 3 rounds"]
         analyst["Analyst agent<br/><i>LLM with tools: drafts APPROVE or REJECT</i>"] --> vp["VP agent<br/><i>LLM: checks the analyst's reasoning</i>"]
@@ -92,14 +94,16 @@ flowchart TD
 2. **Only money differences** (a price, total or currency that differs from Acme's records, or an amount that isn't printed on the invoice) send the invoice to **Needs a person**, whether the agents approved or rejected it.
 3. **Otherwise an approval is Paid.**
 
+An invoice that already breaks a hard rule never reaches the analyst and VP at all: it goes straight from Validate to **Log rejection**, so a rule-rejected invoice finishes in seconds (INV-1016 went from about 25 s to about 5 s in a live run).
+
 Other agent rejections go straight to **Rejected**, and if the analyst and VP still disagree after 3 rounds, the invoice goes to **Needs a person**.
 
 ### How an invoice moves through the app
 
 1. **Read.** The file's text is pulled out (pdfplumber for PDFs, plain text for everything else) and the file gets a fingerprint so the same file is never paid twice.
 2. **Ingest.** The ingestion agent turns the messy text into a structured invoice. Code then cleans the values: dates become real dates, money becomes exact decimals, "Widget A" becomes the inventory item WidgetA.
-3. **Validate.** The rulebook (below) checks the invoice against Acme's inventory, price list and invoice history and produces flags. If this exact invoice was already processed, it stops here as a duplicate.
-4. **Analyst and VP.** The analyst investigates with its tools and recommends APPROVE or REJECT with evidence. The VP reviews that reasoning and either accepts it or sends it back with specific feedback. They get up to 3 rounds to agree.
+3. **Validate.** The rulebook (below) checks the invoice against Acme's inventory, price list and invoice history and produces flags. If this exact invoice was already processed, it stops here as a duplicate. If a hard rule is already broken, the invoice skips the agents' discussion and goes straight to a logged rejection.
+4. **Analyst and VP.** (Only for invoices that broke no hard rule.) The analyst investigates with its tools and recommends APPROVE or REJECT with evidence. The VP reviews that reasoning and either accepts it or sends it back with specific feedback. They get up to 3 rounds to agree.
 5. **Guardrail.** If the agents approve, code double-checks: any hard-rule flag forces a rejection, and an invoice with only price, total or currency differences goes to a person, whether the agents approved or rejected it.
 6. **Decide.** The invoice is paid through the mock payment API, rejected with written reasons, or held for a person on the review screen. Every outcome records who decided (agents, guardrail, human or system) and why.
 
@@ -111,6 +115,7 @@ Other agent rejections go straight to **Rejected**, and if the analyst and VP st
 - **Self-correction:** if the answer doesn't fit the schema or has no line items, the errors are sent back and it tries again (up to 2 retries). Low-confidence fields are highlighted on the review screen.
 
 **Analyst agent** (`invoice_agent/agents/analyst/`)
+- **When it runs:** only for invoices that broke no hard rule. A rule-rejected invoice skips the analyst and the VP and is rejected in seconds.
 - **Job:** act as the accounts-payable analyst. Given the invoice, its validation flags and the uncertain fields, draft a recommendation: APPROVE or REJECT, with reasoning and evidence.
 - **How it works:** a Grok agent that calls tools to gather facts instead of assuming them (stock, reference prices, vendor history, exact arithmetic). It must explain every flag that needs scrutiny; anything unexplained means REJECT. Invoices over $10,000 also need a 5-point checklist: vendor history, prices, stock, arithmetic and payment terms.
 - **When sent back:** it gets the VP's feedback and must address every point in its next draft.
@@ -194,6 +199,10 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 
 ## Human in the loop
 
+**Why a person belongs in an agent system.** LangChain's [human-in-the-loop docs](https://docs.langchain.com/oss/python/langchain/human-in-the-loop) describe the idea as pausing an agent before an action runs so a person can review it. It is meant for actions that are hard to undo or that need sign-off, and it lets you add human oversight to what an agent proposes. The graph state is saved through LangGraph's persistence layer, so execution can pause safely and resume later, even in another process. The reviewer can then approve, edit, or reject with feedback.
+
+Paying a vendor is exactly that kind of action: hard to undo, and it needs sign-off. So the agents prepare the case, code blocks what is clearly wrong, and a person signs off where judgment and money meet: when the agents still disagree after 3 rounds, or when prices, totals or currency differ from Acme's records.
+
 **What brings in a person:**
 - The analyst and VP can't agree within 3 rounds.
 - An invoice's price, total or currency differs from Acme's records (and no hard rule is broken), whether the agents recommended APPROVE or REJECT.
@@ -216,6 +225,40 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 - **Local review screen is guarded:** state-changing requests must come from the screen itself (CSRF origin check), the server only answers to localhost (trusted-host check against DNS rebinding), each web request opens its own SQLite connection (WAL, 5 s busy timeout), and uploads are size-limited with sanitized file names.
 - **Human decisions are final and recorded:** a human approve or reject is never overturned by a re-run, and approving over a hard rule requires a justification that is logged.
 - **Rules are data, not magic:** inventory is static reference data, so outcomes don't depend on processing order (only which copy of a duplicate pair counts as the original can vary); business knobs (3 rounds, $10K threshold, 2 extraction retries) are in `invoice_agent/infra/config.py`.
+
+## What we hardened along the way
+
+Each item below was found by code review, a security review or a live run against the sample invoices, then fixed and covered by tests.
+
+**Money and payments**
+- The ingestion agent was "fixing" printed totals to make the math add up (INV-1013's $50 overbilling and INV-1007's $110 under-billing disappeared). It now copies amounts exactly, and code checks that each amount appears on the document.
+- Overbilling (a stated total above line items + tax + shipping) and line totals above quantity × price are hard rejects, priced from quantity × unit price so a vendor can't inflate line totals to hide it.
+- A crash right after a payment, a re-run of a paid file, the same invoice in two formats, or a reused invoice number can never cause a second payment (content fingerprints, checkpoint recovery, duplicate detection).
+- A person's decision is final: re-running a file never overturns it.
+- Payment refuses to run if the vendor or total is missing.
+
+**Validation**
+- Validation fails closed: missing quantities, prices, vendors or totals, an invoice with no line items, and an item missing from inventory all block payment instead of slipping through.
+- Partial dates (like "Jan 2026") are no longer silently completed from today's date.
+- Invoice numbers like INV-01002 and INV-1002 are recognized as the same number.
+- Amounts like "1E+999999" no longer crash the math check.
+
+**Agents and AI safety**
+- Prompt injection: vendor text is fenced as untrusted data, the policy lives in the system prompt, and any price, total or currency difference goes to a person, so text on an invoice can't talk the agents into paying.
+- Item names that needed cleaning (e.g. "WidgetA (free)") are recorded and highlighted rather than silently matched.
+- Grok's function-calling sometimes returned an empty invoice; extraction now uses a strict JSON schema and retries when no line items come back.
+- grok-3 timed out on the analyst's tool loop; the default model is grok-4-1-fast-non-reasoning.
+- Invoices that already break a hard rule skip the analyst and VP discussion and are rejected in seconds.
+
+**Reliability and concurrency**
+- Batch runs process 5 invoices at a time; the duplicate check is atomic, so two copies running together can't both count as the original.
+- The analyst's parallel tool calls shared one database connection and mixed up rows (it once rejected a valid invoice); connections are now per thread and locked.
+- A Grok timeout on one invoice ends that invoice as ERROR (retried once at the end of a batch) instead of crashing the run.
+- Reusing a run could replay an old outcome; per-run state is now reset.
+
+**Web screen**
+- The screen only accepts same-origin requests and localhost hosts (cross-site request and DNS-rebinding protection), uploads are size-limited with sanitized file names, and all vendor text is escaped.
+- A double click can't resume and pay a decision twice, and errors show a plain message instead of a stack trace.
 
 ## Testing
 
