@@ -1,0 +1,10 @@
+{#- A plain one-message page (e.g. a blocked cross-site request), with a way back to the queue. -#}
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<section class="empty" aria-labelledby="message-title">
+  <h1 id="message-title">{{ title }}</h1>
+  <p>{{ message }}</p>
+  <p><a href="/">Back to all invoices</a></p>
+</section>
+{% endblock %}

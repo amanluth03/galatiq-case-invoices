@@ -47,7 +47,7 @@ def build_runtime(settings: Settings) -> tuple[Deps, object]:
     return deps, graph
 
 
-def _hydrate(state: dict) -> PipelineState:
+def hydrate(state: dict) -> PipelineState:
     """Turn a stored state_json dict back into typed models so callers see the same shape as a fresh run."""
     out = dict(state)
     single = {"invoice": Invoice, "approval": ApprovalOutcome, "human_decision": HumanDecision,
@@ -119,7 +119,7 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
             # A human's decision (even a rejection) is never overturned by re-running the agents.
             decided_by = (existing["state"].get("final") or {}).get("decided_by")
             if existing["status"] in _KEEP_STATUSES or decided_by == "human":
-                return _hydrate(existing["state"])
+                return hydrate(existing["state"])
             # A crash after pay but before the final save leaves ERROR in the DB while the checkpoint says PAID:
             # recover that result instead of re-running, so the vendor is never paid twice.
             saved = _paid_checkpoint(graph, existing["run_id"])

@@ -2,12 +2,14 @@
 It sits at the end of the pipeline: a run paused in human_review is resumed here through runner.resume_review.
 Everything shown is translated into plain language for a PE analyst/VP: dollars, risks and reasons, never raw JSON.
 """
+import logging
 import threading
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -15,10 +17,14 @@ from fastapi.templating import Jinja2Templates
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps
 from invoice_agent.infra import db
+from invoice_agent.infra.logging_setup import RUN_LOGGER
 from invoice_agent.models import Flag, PipelineState, Uncertainty
-from invoice_agent.runner import _hydrate, resume_review
+from invoice_agent.runner import hydrate, resume_review
 from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON
 from invoice_agent.web.highlight import highlight
+from invoice_agent.web.security import ALLOWED_HOSTS, is_same_origin, needs_origin_check
+
+log = logging.getLogger(RUN_LOGGER)
 
 HERE = Path(__file__).parent
 
@@ -108,14 +114,16 @@ def quantity(value) -> str:
 
 def nice_date(value) -> str:
     """Format a date as 15 Jan 2026; a dash when unknown."""
-    return value.strftime("%-d %b %Y") if isinstance(value, date) else "—"
+    # value.day instead of %-d: the no-padding flag is not portable (it fails on Windows).
+    return f"{value.day} {value.strftime('%b %Y')}" if isinstance(value, date) else "—"
 
 
 def nice_time(iso: str | None) -> str:
-    """Format a stored ISO timestamp as 17 Nov, 14:32 (UTC) for the queue."""
+    """Format a stored ISO timestamp as "17 Nov, 14:32 UTC" for the queue (times are stored in UTC)."""
     if not iso:
         return "—"
-    return datetime.fromisoformat(iso).strftime("%-d %b, %H:%M")
+    t = datetime.fromisoformat(iso)
+    return f"{t.day} {t.strftime('%b, %H:%M')} UTC"
 
 
 def _plural(n: int, pair: tuple[str, str]) -> str:
@@ -196,7 +204,9 @@ def why_line(state: PipelineState) -> str:
     if final.status == "DUPLICATE":
         return "Already processed — not paid twice"
     if final.status == "ERROR":
-        return "Couldn't read this file: " + _first_sentence(final.reasoning, 80)
+        # No raw text means the read step itself failed; otherwise a later stage (extraction, agents) did.
+        prefix = "Processing failed: " if state.get("raw_text") else "Couldn't read this file: "
+        return prefix + _first_sentence(final.reasoning, 80)
     if final.decided_by == "human":
         return ("Approved by a reviewer: " if final.status == "PAID" else "Rejected by a reviewer: ") + \
             _first_sentence(final.reasoning, 90)
@@ -225,7 +235,7 @@ def queue_view(rows: list[dict]) -> dict:
     review_count = 0
     items = []
     for row in rows:
-        state = _hydrate(row["state"])
+        state = hydrate(row["state"])
         inv = state.get("invoice")
         currency = inv.currency if inv else "USD"
         status = row["status"] or "ERROR"
@@ -253,7 +263,7 @@ def _worst_severity(flags: list[Flag]) -> str | None:
 
 def detail_view(row: dict) -> dict:
     """Everything the detail page shows for one run, already formatted for display."""
-    state = _hydrate(row["state"])
+    state = hydrate(row["state"])
     final, inv, approval = state["final"], state.get("invoice"), state.get("approval")
     flags, uncs = state.get("flags", []), state.get("uncertainties", [])
     currency = inv.currency if inv else "USD"
@@ -336,6 +346,8 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
     app = FastAPI(title="Invoice review", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
+    # Answer only to local host names, so a hostile site can't reach this server via DNS rebinding.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
     # One decision at a time: two quick clicks must never resume (and pay) the same run twice.
     decision_lock = threading.Lock()
 
@@ -351,6 +363,17 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
     def not_found(request: Request) -> HTMLResponse:
         """A friendly 404 page for an unknown run id."""
         return render(request, "queue.html", {"missing": True, **queue_view(db.list_runs(conn))}, 404)
+
+    @app.middleware("http")
+    async def same_origin_only(request: Request, call_next):
+        """Refuse any state-changing request (decisions, uploads) that doesn't come from this screen's own pages."""
+        if needs_origin_check(request) and not is_same_origin(request):
+            return render(request, "message.html", {
+                "title": "Request blocked",
+                "message": "This action has to come from the review screen itself, so it was blocked. "
+                           "Nothing was approved, rejected or paid. Open the invoice here and try again.",
+            }, 403)
+        return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     def queue(request: Request):
@@ -392,6 +415,12 @@ def create_app(deps: Deps, graph, conn) -> FastAPI:
                 if "justification required" not in str(exc):
                     raise
                 return render_detail(request, row, 400, error=message, form=form)
+            except Exception:
+                # E.g. a missing or corrupt checkpoint: log the detail, show the reviewer a plain notice.
+                log.exception("decision failed", extra={"fields": {"run_id": run_id}})
+                return render_detail(request, db.get_run(conn, run_id) or row, 500, form=form, notice=(
+                    "We couldn't record that decision — the run's saved progress is missing or damaged. "
+                    "Nothing was paid."))
         return RedirectResponse(f"/invoices/{run_id}?decided=1", status_code=303)
 
     return app

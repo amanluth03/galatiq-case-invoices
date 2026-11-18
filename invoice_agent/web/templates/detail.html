@@ -56,7 +56,8 @@
     </div>
     <div class="field">
       <label for="justification">Justification <span class="req">required to approve</span></label>
-      <textarea id="justification" name="justification" rows="3" aria-describedby="justification-hint"
+      <textarea id="justification" name="justification" rows="3"
+        aria-describedby="{% if error %}form-error {% endif %}justification-hint"
         {% if error %}aria-invalid="true" autofocus{% endif %}>{{ form.justification }}</textarea>
       <p class="hint" id="justification-hint">For example: “Backorder agreed with the vendor by phone; delivery in two batches.”</p>
     </div>
@@ -184,7 +185,7 @@
 
 {% if inv.rounds %}
 <details class="card timeline">
-  <summary><h2>How the agents decided</h2> <span class="hint">{{ inv.rounds | length }} round{{ "s" if inv.rounds | length != 1 }} between the analyst and the VP</span></summary>
+  <summary><span class="summary-title">How the agents decided</span> <span class="hint">{{ inv.rounds | length }} round{{ "s" if inv.rounds | length != 1 }} between the analyst and the VP</span></summary>
   <ol class="rounds">
     {% for r in inv.rounds %}
     <li class="round">
