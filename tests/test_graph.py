@@ -333,3 +333,50 @@ def test_sqlite_checkpoint_round_trip_has_no_unregistered_types(conn, tmp_path):
     assert out["final"].status == "PAID" and len(pay.calls) == 1
     assert isinstance(state["final"], FinalOutcome) and isinstance(state["human_decision"], HumanDecision)
     assert [e for e in events if e["kind"] in ("msgpack_unregistered_allowed", "msgpack_blocked")] == []
+
+
+def extracted_price_mismatch():
+    """1001 billed at $260 per WidgetA instead of the $250 reference; the arithmetic itself is consistent."""
+    return make_extracted(
+        subtotal="5100.00", total="5100.00",
+        items=[ExtractedLineItem(name=_f("WidgetA"), qty=_f("10"), unit_price=_f("260.00"), line_total=_f("2600.00")),
+               ExtractedLineItem(name=_f("WidgetB"), qty=_f("5"), unit_price=_f("500.00"), line_total=_f("2500.00"))],
+    )
+
+
+def test_agent_approval_over_price_mismatch_goes_to_human(conn):
+    """Agents approve an off-price invoice: the guardrail pauses it for a person instead of paying."""
+    ex = ScriptedExtractor([extracted_price_mismatch()])
+    a, v = ScriptedAnalyst([make_recommendation()]), ScriptedVP([make_review()])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, config = run(graph, "invoice_1001.txt")
+    assert "price_mismatch" in {f.code for f in out["flags"]}
+    assert "__interrupt__" in out and out.get("final") is None
+    assert out["approval"].decision == "NEEDS_HUMAN_REVIEW"
+    assert out["approval"].reasoning.startswith("Agents approved, but the invoice's prices or totals differ")
+    assert len(pay.calls) == 0
+    # The human's APPROVE is final: it pays, exactly once.
+    done = graph.invoke(Command(resume={"decision": "APPROVE", "note": "rate agreed", "justification": None}), config)
+    assert done["final"].status == "PAID" and done["final"].decided_by == "human"
+    assert pay.calls == [("Widgets Inc.", Decimal("5100.00"))]
+    assert len(a.calls) == 1 and len(v.calls) == 1
+
+
+def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path):
+    """An over-$10K invoice at reference prices with urgency wording is paid on the agents' APPROVE."""
+    # The urgency flag comes from the raw text, so the file says it; the scripted extraction supplies the fields.
+    source = tmp_path / "urgent.txt"
+    source.write_text("Widgets Inc. invoice — URGENT, please pay immediately")
+    ex = ScriptedExtractor([make_extracted(
+        subtotal="12500.00", total="12500.00",
+        items=[ExtractedLineItem(name=_f("WidgetA"), qty=_f("15"), unit_price=_f("250.00"), line_total=_f("3750.00")),
+               ExtractedLineItem(name=_f("WidgetB"), qty=_f("10"), unit_price=_f("500.00"), line_total=_f("5000.00")),
+               ExtractedLineItem(name=_f("GadgetX"), qty=_f("5"), unit_price=_f("750.00"), line_total=_f("3750.00"))],
+    )])
+    a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)])
+    v = ScriptedVP([make_review()])
+    graph, pay = make_graph(conn, ex, a, v)
+    out = graph.invoke({"run_id": "run-1", "source_path": str(source)}, {"configurable": {"thread_id": "run-1"}})
+    assert {(f.severity, f.code) for f in out["flags"]} == {("needs_scrutiny", "over_10k"), ("info", "urgency_language")}
+    assert out["final"].status == "PAID" and out["final"].decided_by == "agents"
+    assert pay.calls == [("Widgets Inc.", Decimal("12500.00"))]

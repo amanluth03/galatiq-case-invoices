@@ -21,7 +21,7 @@ from invoice_agent.agents.approval.policy import APPROVAL_POLICY
 from invoice_agent.agents.extractor.agent import Extractor, run_extraction
 from invoice_agent.infra.db import all_skus
 from invoice_agent.models import FinalOutcome, HumanDecision, JustifiedHumanDecision, PipelineState
-from invoice_agent.utils.guardrail import apply_guardrail
+from invoice_agent.utils.guardrail import apply_guardrail, needs_human_confirmation
 from invoice_agent.utils.reader import read_file
 from invoice_agent.utils.validation.validate import find_duplicate, fingerprint, run_validation
 
@@ -128,12 +128,19 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         goto = {"APPROVE": "guardrail", "REJECT": "log_rejection", "NEEDS_HUMAN_REVIEW": "human_review"}[outcome.decision]
         return Command(goto=goto, update={"approval": outcome})
 
-    def guardrail(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
-        """Block an agent APPROVE when any must_reject flag is set; otherwise let it through to pay."""
-        forced = apply_guardrail(state.get("flags", []))
-        if forced is None:
-            return Command(goto="pay")
-        return Command(goto="log_rejection", update={"guardrail_outcome": forced})
+    def guardrail(state: PipelineState) -> Command[Literal["pay", "log_rejection", "human_review"]]:
+        """Block an agent APPROVE over any must_reject flag; send price/total deviations to a human; otherwise pay."""
+        flags = state.get("flags", [])
+        forced = apply_guardrail(flags)
+        if forced is not None:
+            # must_reject wins over everything, including a needed human confirmation.
+            return Command(goto="log_rejection", update={"guardrail_outcome": forced})
+        reason = needs_human_confirmation(flags)
+        if reason is not None:
+            # The rounds keep the agents' own reasoning; the outcome now says why a person must look.
+            held = state["approval"].model_copy(update={"decision": "NEEDS_HUMAN_REVIEW", "reasoning": reason})
+            return Command(goto="human_review", update={"approval": held})
+        return Command(goto="pay")
 
     def human_review(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
         """Pause for a human decision; on resume, a human APPROVE goes straight to pay (it overrides the guardrail)."""
