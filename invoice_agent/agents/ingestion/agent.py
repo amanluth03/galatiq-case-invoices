@@ -14,6 +14,9 @@ from invoice_agent.models import ExtractedInvoice, Invoice, Uncertainty
 # (raw_text, errors_from_previous_attempt) -> structured extraction.
 IngestionAgent = Callable[[str, list[str]], ExtractedInvoice]
 
+# Every invoice has at least one line; an extraction without any means the agent read nothing (or returned empty).
+NO_ITEMS_ERROR = "no line items were extracted: read every item line (name, quantity, unit price) from the text"
+
 
 class ExtractionFailed(RuntimeError):
     """Raised when the ingestion agent itself fails on every attempt (no usable output at all)."""
@@ -52,6 +55,9 @@ def run_extraction(
             errors = [str(exc)]
             continue
         errors = reconcile(invoice)
+        # An empty answer passes arithmetic trivially (nothing to add up), so it needs its own check.
+        if not invoice.items:
+            errors = [NO_ITEMS_ERROR, *errors]
         last = (invoice, uncertainties, errors)
         if not errors:
             break
@@ -63,7 +69,9 @@ def run_extraction(
 
 def make_ingestion_agent(model) -> IngestionAgent:
     """Build the Grok IngestionAgent: structured output into ExtractedInvoice, with the previous attempt's errors fed back."""
-    structured = model.with_structured_output(ExtractedInvoice)
+    # json_schema, not the default function_calling: in live runs Grok's function-calling answer sometimes came
+    # back as an empty tool call ({}), which validates as a blank invoice because every field is optional.
+    structured = model.with_structured_output(ExtractedInvoice, method="json_schema")
 
     def extract(raw_text: str, errors: list[str]) -> ExtractedInvoice:
         """Send the prompt and raw text (plus a correction request on retries) and return the parsed extraction."""

@@ -1,6 +1,156 @@
-# Galatiq Case: Invoice Processing Automation
+# Acme invoice pipeline — multi-agent invoice processing (Galatiq case)
 
-## Background
+## What it does
+
+The system takes an invoice in whatever shape it arrives (PDF, text, JSON, CSV, XML; typos, odd labels, missing fields), reads it with an AI agent, checks it against Acme's inventory and price list, has two AI agents (an analyst and a VP) argue the approve/reject decision, and then either pays it through the mock payment API or logs the rejection with written reasoning. Hard rules (stock, unknown items, bad data, double-billing) are enforced by code, not by the AI, so no argument from an agent or text on an invoice can get a bad invoice paid. Every outcome records who decided (agents, guardrail, human or system) and why. When the agents can't settle a case, or approve an invoice whose prices differ from Acme's records, it waits for a person on a review screen built for a PE analyst or VP.
+
+### Business impact
+
+Acme loses about **$2M/year** to manual invoice handling: a **30% error rate** and **5-day delays**.
+
+- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **only 5 of 20 needed a person**; the rest were settled with written reasons.
+- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time — **9 of the 20 samples are blocked this way**, and **3 more are recognized as the same invoice sent twice**, so they are never paid twice.
+- **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an approved invoice's prices or totals differ from Acme's reference (a rush fee, a discount, a foreign currency). The reviewer sees the original document with the uncertain spots highlighted, the agents' argument, and a plain verdict — not logs.
+- **Every decision is auditable.** Reasoning, flags, the full analyst ⇄ VP exchange and the deciding party are stored per invoice.
+
+## Quick start
+
+Requires Python 3.11+ and an xAI API key.
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate   # or: python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"                               # or: uv pip install -e ".[dev]"
+cp .env.example .env                                  # then put your key in XAI_API_KEY=...
+```
+
+| Command | What it does |
+|---|---|
+| `python main.py --invoice_path=data/invoices/invoice_1001.txt` | Process one invoice; prints invoice, vendor, amount, outcome, why, decided by |
+| `python main.py --invoice_dir=data/invoices` | Process every file in a folder (in filename order); prints a summary table |
+| `python main.py --reset` | Wipe run history, results and checkpoints (inventory is re-seeded) for a clean demo; combine with the other flags |
+| `python main.py --serve` | Start the review screen at **http://127.0.0.1:8000** |
+
+The review screen lets you upload invoices or **process all samples** with one click, watch each invoice move through the stages live, work the **review queue** (needs-review items on top, dollar exposure summarized), open an invoice to see the original document beside the extracted fields, and **approve or reject** with a note. The CLI never blocks on a human: paused invoices end the run as `NEEDS_HUMAN_REVIEW` and are resumed from the screen.
+
+Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history), `var/checkpoints.db` (paused runs), `var/logs/run.jsonl` (one structured JSON line per pipeline stage). The model is set by `XAI_MODEL` (default `grok-4-1-fast-non-reasoning`).
+
+## Architecture
+
+```
+ invoice file (.pdf .txt .json .csv .xml)
+        │
+        ▼
+ read_file ............................................................ code
+   pdfplumber / plain text, light unicode cleanup, sha256 content hash
+        │
+        ▼
+ extract (INGESTION AGENT) ....................................... Grok agent
+   structured output: every field = value + exact source snippet + confidence
+   code then normalizes: dates → ISO, money → Decimal, "Widget A" → SKU WidgetA
+   self-check: arithmetic / schema errors are sent back to Grok (≤ 2 retries)
+        │
+        ▼
+ validate ............................................................. code
+   rulebook against inventory.db + invoice history → flags (must_reject /
+   needs_scrutiny / info); same invoice seen before → DUPLICATE (stop)
+        │
+        ▼
+ approval loop ................................................. two Grok agents
+   ANALYST  tools: get_inventory, get_invoice_history, get_approval_policy,
+            calculate → APPROVE / REJECT + reasoning (+ 5-point checklist > $10K)
+      ▲  │
+      │  ▼
+   VP       tools: get_approval_policy, get_inventory (spot-check)
+            → ACCEPT (final APPROVE / REJECT) or SEND_BACK with feedback
+   code routes: SEND_BACK or incomplete > $10K checklist → analyst again;
+                3 rounds without agreement → NEEDS_HUMAN_REVIEW
+        │
+   APPROVE ──────────────┐            REJECT            NEEDS_HUMAN_REVIEW
+        ▼                │               │                     │
+ guardrail ...... code   │               │                     ▼
+   any must_reject flag ─┼─ force REJECT ┤        human_review (LangGraph interrupt)
+   price / total differs │               │          state saved in SQLite checkpointer;
+   from Acme's records ──┼───────────────┼──────▶   resumed from the review screen;
+   otherwise ↓           │               │          approving over a must_reject flag
+        ▼                │               ▼          needs a written justification
+      pay (mock_payment) ◀──── human APPROVE ───────┤
+                                  log_rejection ◀───┘ human REJECT
+        │                              │
+        └──────────────┬───────────────┘
+                       ▼
+          var/app.db  ──▶  review screen (FastAPI, server-rendered HTML)
+```
+
+**Agentic vs deterministic.** AI is used only where judgment is needed: reading messy documents (the ingestion agent) and weighing evidence into a decision with reasons (analyst and VP). Everything that must be exact or must never be talked out of — stage order, arithmetic, stock and price checks, duplicate detection, the payment gate — is plain Python. The LangGraph graph decides what runs next; no LLM chooses a stage or calls payment. The analyst ⇄ VP loop is a real critique loop: it ends when the VP is satisfied with the *reasoning*, so a well-argued REJECT is a successful outcome.
+
+### Folder map
+
+| Path | Contents |
+|---|---|
+| `main.py` | CLI entry point (`--invoice_path`, `--invoice_dir`, `--reset`, `--serve`) |
+| `invoice_agent/graph.py` | The LangGraph pipeline: stages, routing, guardrail, human-review interrupt, pay / log |
+| `invoice_agent/runner.py` | Runs files through the graph, re-run policy, saving results, resuming reviews |
+| `invoice_agent/models.py` | Shared Pydantic models and graph state |
+| `invoice_agent/agents/` | Everything that calls Grok: `ingestion/`, `analyst/`, `vp/` (prompt + agent each), `approval/` (loop, policy, tools, briefing), `llm.py` |
+| `invoice_agent/utils/` | Plain-code stages: `reader.py`, `normalize.py`, `arithmetic.py`, `validation/` (rulebook, duplicates), `guardrail.py`, `payments.py` |
+| `invoice_agent/infra/` | `config.py` (settings and business knobs), `db.py` (SQLite inventory + run history), `logging_setup.py` |
+| `invoice_agent/web/` | Review screen: `app.py` (routes, upload, background runs), `security.py`, `highlight.py`, `templates/`, `static/` |
+| `tests/` | Mirrors the package; offline tests use scripted fake agents |
+
+## The rulebook
+
+Validation produces flags in three severities. The agents see all of them; code enforces the first column regardless of what the agents conclude.
+
+| Severity | What it means | Checks |
+|---|---|---|
+| **must_reject** | Never paid on the agents' say-so. If the agents approve anyway, the guardrail forces REJECT. Only a human can override, with a written justification. | quantity exceeds stock (summed across repeated lines of the same item) · item not in inventory · zero-stock / suspicious item · quantity ≤ 0 · negative total · missing vendor or total · missing quantity · no line items · stated total higher than line items + tax + shipping · line total higher than qty × price · invoice number already used with different contents (possible double-billing) |
+| **needs_scrutiny** | The analyst must explain each one in writing; unexplained means REJECT. A price or total deviation also sends an agent APPROVE to a person before payment. | unit price ≠ Acme reference price (any amount, no tolerance) · totals don't reconcile · total over $10K (triggers a 5-point checklist the VP cannot skip) · due date missing or on/before invoice date · non-USD currency · missing unit price · extraction uncertainty |
+| **info** | Context for the agents; decides nothing on its own. | urgency / wire-transfer pressure language · "formerly" vendor rename |
+
+Reference stock and prices (seed data, extended with a `unit_price` column): WidgetA 15 @ $250, WidgetB 10 @ $500, GadgetX 5 @ $750, FakeItem 0.
+
+## Results on the sample invoices
+
+RESULTS_PLACEHOLDER
+
+## Safety and design decisions
+
+- **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total deviation — or a human approves on the review screen.
+- **Never pay twice:** the same invoice in two formats is caught by a content fingerprint and marked DUPLICATE; a reused number with different contents is rejected; re-running a file that was already paid or is awaiting review returns the stored result; a crash after payment is recovered from the checkpoint instead of paying again.
+- **Prompt-injection defenses:** vendor text is fenced as untrusted data in the agents' briefing, the policy lives in the system prompt, and every rule that matters is a code gate the agents cannot argue past.
+- **Fail closed:** missing quantities, prices, vendors or totals, totals too large to verify, and unreadable files all end in REJECT, review or ERROR — never in payment.
+- **Money is `Decimal`, never float:** amounts reconcile to the cent.
+- **Local review screen is guarded:** state-changing requests must come from the screen itself (CSRF origin check) and the server only answers to localhost (trusted-host check against DNS rebinding); uploads are size-limited and file names sanitized.
+- **Human decisions are final and recorded:** a human approve or reject is never overturned by a re-run, and approving over a hard rule requires a justification that is logged.
+- **Rules are data, not magic:** inventory is static reference data, so outcomes don't depend on processing order; business knobs (3 rounds, $10K threshold, 2 extraction retries) are in `invoice_agent/infra/config.py`.
+
+## Testing
+
+```bash
+.venv/bin/pytest                      # offline suite: 213 tests, ~6 s, no network (scripted fake agents)
+.venv/bin/pytest -m live -v -s        # live tests against real Grok (reads XAI_API_KEY from .env)
+timeout 1500 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s   # all 20 samples end to end
+```
+
+The offline suite covers reading, normalization, every rulebook check, the guardrail, the approval loop routing, the graph (pause/resume, duplicates, error paths), the runner's re-run policy, the CLI and the review screen. The live suite has 22 tests: one extraction test and the end-to-end sample test, which runs the whole folder into a temporary database (it never touches your `var/`) and asserts every outcome that code guarantees — rejections, duplicates, and that price-deviating invoices are never auto-paid. Outcomes that are genuine LLM judgment (PAID vs needs review for clean invoices) are printed, not asserted.
+
+## Assumptions and limitations
+
+- **Local prototype:** single machine, SQLite, no cloud deployment; payment is the README's mock function.
+- **No reviewer login:** the review screen is localhost-only and has no authentication or per-user roles; anyone at the machine can approve.
+- **Currency:** EUR (and any non-USD) amounts are not converted; they are flagged and compared as-is, so such invoices go to a person.
+- **Prices are ground truth:** any deviation from Acme's reference price is scrutinized, even a legitimate discount — the cost is an extra human click on those invoices.
+- **PDFs need a text layer:** scanned image PDFs are reported, not OCR'd.
+- **Model choice:** `grok-4-1-fast-non-reasoning` at temperature 0. `grok-3` timed out and returned HTTP 500s on the analyst's tool-calling loop in testing; this model ran the whole pipeline reliably and quickly. Override with `XAI_MODEL`.
+- **LLM judgment varies:** a clean invoice may be PAID on one run and sent to review on another; the hard outcomes (rejections, duplicates, no auto-pay on price deviations) are enforced by code and do not vary.
+
+---
+
+## Case brief
+
+The original case brief, kept as provided.
+
+### Background
 
 Acme Corp is a PE-backed manufacturing firm losing **$2M/year** on manual invoice processing. Invoices arrive via email as PDFs in messy formats with frequent errors. Staff manually extract data, validate against a legacy inventory database (inconsistent), obtain VP approval (via email chains), and process payment (via a banking API).
 
@@ -9,11 +159,11 @@ Acme Corp is a PE-backed manufacturing firm losing **$2M/year** on manual invoic
 - 5-day processing delays
 - Frustrated stakeholders
 
-## Objective
+### Objective
 
 Build a **multi-agent system** that automates the end-to-end invoice processing workflow. The system must run as a working prototype — not just designs or slides.
 
-## Workflow
+### Workflow
 
 The system should handle four stages:
 
@@ -25,7 +175,7 @@ The system should handle four stages:
 
 4. **Payment** — If approved, call a mock payment function. If rejected, log the rejection with reasoning.
 
-## Technical Requirements
+### Technical Requirements
 
 - **LLM Integration**: Use xAI's Grok as the core reasoning engine (via the xAI API at https://grok.x.ai). Other models are acceptable if you don't have an API key.
 - **Multi-Agent Orchestration**: Use a framework such as LangGraph, CrewAI, AutoGen, or a custom solution.
@@ -33,13 +183,13 @@ The system should handle four stages:
 - **Runtime**: Assume no internet for external APIs — simulate everything locally.
 - **Tech Stack**: Python (preferred), with libraries like `langchain`, `crewai`, `autogen`, `pdfplumber`, `PyMuPDF`, etc. Run locally — no cloud deployment.
 
-## Provided Resources
+### Provided Resources
 
-### Mock Invoice Data
+#### Mock Invoice Data
 
 Sample invoices are provided in the `data/invoices/` directory in various formats (PDF, CSV, JSON, TXT). Use these as inputs for testing. The data intentionally includes a mix of clean entries and problematic ones — identifying and handling issues is part of the challenge.
 
-### Mock Inventory Database (Required Setup)
+#### Mock Inventory Database (Required Setup)
 
 Before running the system, you **must** create a local SQLite database that the validation agent will check invoices against. The sample invoices in `data/invoices/` reference specific items and quantities — your database needs to contain matching inventory records so the validation stage can flag mismatches, out-of-stock items, and unknown products.
 
@@ -74,7 +224,7 @@ conn.commit()
 
 You may extend the seed data with additional items or columns (e.g., unit price, category) to support richer validation — the above is the minimum needed to exercise the provided test invoices. If you want your system to also validate pricing or vendor information, consider adding tables for those as well.
 
-### Mock Payment API
+#### Mock Payment API
 
 ```python
 def mock_payment(vendor, amount):
@@ -82,7 +232,7 @@ def mock_payment(vendor, amount):
     return {"status": "success"}
 ```
 
-### Grok API Setup
+#### Grok API Setup
 
 ```python
 from xai import Grok
@@ -94,7 +244,7 @@ response = client.chat.completions.create(
 )
 ```
 
-## Running the System
+### Running the System
 
 The system should be executable from the command line:
 
@@ -104,7 +254,7 @@ python main.py --invoice_path=data/invoices/invoice1.txt
 
 Output should include structured logs and results.
 
-## Evaluation Criteria
+### Evaluation Criteria
 
 - **Functionality** — Does the system work end-to-end?
 - **Code Quality** — Clean, testable, well-structured code with error handling and observability
@@ -114,6 +264,6 @@ Output should include structured logs and results.
 - **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
 - **UI/UX** - Users will understand and enjoy using this system.
 
-## Submission
+### Submission
 
 Submit your solution as a link to a public GitHub repository — GitHub only (github.com).

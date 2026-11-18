@@ -3,6 +3,7 @@
 import pytest
 
 from invoice_agent.agents.ingestion.agent import INGESTION_PROMPT, ExtractionFailed, run_extraction
+from invoice_agent.models import ExtractedInvoice
 from tests.fakes import ScriptedIngestionAgent, make_extracted
 
 SKUS = ["WidgetA", "WidgetB", "GadgetX"]
@@ -33,6 +34,23 @@ def test_gives_up_after_max_retries_and_reports_issue():
     assert res.attempts == 3
     assert res.issues and "total" in res.issues[0]
     assert res.invoice.total is not None
+
+
+def test_empty_extraction_is_retried():
+    """An extraction with no line items (Grok sometimes returns an empty tool call) is sent back, not accepted."""
+    ex = ScriptedIngestionAgent([ExtractedInvoice(), make_extracted()])
+    res = run_extraction("raw", ex, SKUS)
+    assert res.attempts == 2
+    assert any("no line items" in e for e in ex.calls[1].errors)
+    assert res.issues == [] and res.invoice.vendor == "Widgets Inc."
+
+
+def test_persistent_empty_extraction_is_reported_as_issue():
+    """If every attempt comes back without line items, the result says so as an issue (validation then rejects it)."""
+    ex = ScriptedIngestionAgent([ExtractedInvoice()] * 3)
+    res = run_extraction("raw", ex, SKUS)
+    assert res.attempts == 3
+    assert any("no line items" in i for i in res.issues)
 
 
 def test_ingestion_agent_exception_then_success():

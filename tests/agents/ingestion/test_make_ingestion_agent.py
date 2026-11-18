@@ -24,10 +24,12 @@ class ModelStub:
         """Create the structured runnable this stub hands out."""
         self.structured = StructuredStub()
         self.schemas: list = []
+        self.kwargs: list[dict] = []
 
-    def with_structured_output(self, schema):
-        """Record the schema and return the recording runnable."""
+    def with_structured_output(self, schema, **kwargs):
+        """Record the schema and options, and return the recording runnable."""
         self.schemas.append(schema)
+        self.kwargs.append(kwargs)
         return self.structured
 
 
@@ -49,3 +51,10 @@ def test_retry_appends_previous_errors_as_user_message():
     msgs = model.structured.calls[0]
     assert len(msgs) == 3 and msgs[2][0] == "user"
     assert "- total: expected 5000.00, found 5500.00\n- items[0]: bad qty" in msgs[2][1]
+
+
+def test_uses_json_schema_structured_output():
+    """The agent asks for json_schema output: in live runs Grok's function-calling mode sometimes returned empty args."""
+    model = ModelStub()
+    make_ingestion_agent(model)
+    assert model.kwargs == [{"method": "json_schema"}]
