@@ -5,7 +5,7 @@ from datetime import date as Date
 from decimal import Decimal
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 # Closed vocabularies: pydantic rejects any value outside these, so bad LLM output fails loudly.
 Confidence = Literal["high", "medium", "low"]
@@ -139,6 +139,24 @@ class FinalOutcome(BaseModel):
     human_note: str | None = None
 
 
+class HumanDecision(BaseModel):
+    """What a human reviewer sends to resume a paused run; justification is required to approve over must_reject flags."""
+    decision: Literal["APPROVE", "REJECT"]
+    note: str = ""
+    justification: str | None = None
+
+
+class JustifiedHumanDecision(HumanDecision):
+    """The resume schema when the invoice has must_reject flags: approving over them needs a written justification."""
+
+    @model_validator(mode="after")
+    def _require_justification(self):
+        """Reject an APPROVE whose justification is missing or only whitespace."""
+        if self.decision == "APPROVE" and not (self.justification or "").strip():
+            raise ValueError("justification required")
+        return self
+
+
 class PipelineState(TypedDict, total=False):
     """Shared LangGraph state; total=False because each node fills in only its own keys."""
     run_id: str
@@ -153,5 +171,7 @@ class PipelineState(TypedDict, total=False):
     uncertainties: list[Uncertainty]
     flags: list[Flag]
     approval: ApprovalOutcome
+    # Set only when a human resumed the run from human_review.
+    human_decision: HumanDecision
     final: FinalOutcome
     error: str | None

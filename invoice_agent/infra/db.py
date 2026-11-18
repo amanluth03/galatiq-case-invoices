@@ -37,7 +37,8 @@ def connect(path: Path) -> sqlite3.Connection:
     """Open the SQLite file (creating parent dirs) with dict-like rows."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: LangChain runs agent tools (get_inventory, ...) on worker threads.
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 

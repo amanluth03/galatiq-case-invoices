@@ -1,5 +1,6 @@
 """Tests for SQLite inventory seeding and run history (save, lookup, ordering, duplicate lookups, reset).
 """
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from invoice_agent.infra import db
@@ -83,3 +84,11 @@ def test_reset_deletes_db_files(tmp_path):
     db.reset(s)
     assert not s.app_db.exists() and not s.checkpoint_db.exists()
     db.reset(s)
+
+
+def test_connection_usable_from_worker_thread(tmp_path):
+    """Agent tools run on LangChain worker threads, so the connection must work outside the thread that opened it."""
+    conn = _conn(tmp_path)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        row = pool.submit(db.get_inventory, conn, "WidgetA").result()
+    assert row["stock"] == 15
