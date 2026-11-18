@@ -49,8 +49,12 @@ A well-argued REJECT is a good outcome. When evidence is missing or a deviation 
 """
 
 
+def missing_checklist_keys(rec: Recommendation) -> list[str]:
+    """Checklist keys that are absent or blank (all five when there is no checklist)."""
+    checklist = rec.checklist or {}
+    return [k for k in CHECKLIST_KEYS if not (checklist.get(k) or "").strip()]
+
+
 def checklist_complete(rec: Recommendation) -> bool:
     """True when every checklist key is present with non-blank text."""
-    if not rec.checklist:
-        return False
-    return all((rec.checklist.get(k) or "").strip() for k in CHECKLIST_KEYS)
+    return not missing_checklist_keys(rec)

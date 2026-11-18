@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from invoice_agent.approval.policy import CHECKLIST_KEYS, checklist_complete
+from invoice_agent.approval.policy import checklist_complete, missing_checklist_keys
 from invoice_agent.config import MAX_ROUNDS, SCRUTINY_THRESHOLD
 from invoice_agent.models import (
     ApprovalOutcome, Flag, Invoice, Recommendation, Round, Uncertainty, VPReview,
@@ -17,9 +17,9 @@ from invoice_agent.models import (
 class ApprovalContext(BaseModel):
     """Everything both agents get to see about the invoice under review."""
     invoice: Invoice
-    flags: list[Flag] = []
-    uncertainties: list[Uncertainty] = []
-    policy: str = ""
+    flags: list[Flag]
+    uncertainties: list[Uncertainty]
+    policy: str
 
 
 # The analyst receives prior rounds so it can read the VP's feedback.
@@ -40,17 +40,6 @@ def _is_over_threshold(ctx: ApprovalContext) -> bool:
     return bool(total and total > SCRUTINY_THRESHOLD)
 
 
-def _missing_keys(rec: Recommendation) -> list[str]:
-    """Checklist keys the analyst left empty or blank."""
-    checklist = rec.checklist or {}
-    return [k for k in CHECKLIST_KEYS if not (checklist.get(k) or "").strip()]
-
-
-def _append_feedback(review: VPReview, text: str) -> str:
-    """Add a sentence to the VP's existing feedback (or start the feedback with it)."""
-    return f"{review.feedback} {text}" if review.feedback else text
-
-
 def make_analyst_node(analyst: AnalystFn):
     """Build the node that asks the analyst for a recommendation and opens a new round."""
     def analyst_node(state: ApprovalState) -> dict:
@@ -69,20 +58,20 @@ def make_vp_node(vp: VPFn):
         last = rounds[-1]
         review = vp(ctx, last.recommendation, rounds)
         if review.verdict == "ACCEPT":
+            notes = []
             if review.final_decision is None:
                 # An ACCEPT with no APPROVE/REJECT is unusable, so make the VP try again.
-                review = review.model_copy(update={
-                    "verdict": "SEND_BACK",
-                    "feedback": _append_feedback(review, "VP accepted without a final decision"),
-                })
-            elif _is_over_threshold(ctx) and not checklist_complete(last.recommendation):
+                notes.append("VP accepted without a final decision")
+            if _is_over_threshold(ctx) and not checklist_complete(last.recommendation):
                 # Policy: over $10K the VP cannot accept an incomplete checklist, even if it wants to.
-                missing = ", ".join(_missing_keys(last.recommendation))
-                review = review.model_copy(update={
-                    "verdict": "SEND_BACK",
-                    "feedback": _append_feedback(
-                        review, f"Over $10K: checklist incomplete — missing: {missing}"),
-                })
+                missing = ", ".join(missing_checklist_keys(last.recommendation))
+                notes.append(f"Over $10K: checklist incomplete — missing: {missing}")
+            if notes:
+                # Report every problem in one round so none costs an extra round.
+                feedback = review.feedback
+                for note in notes:
+                    feedback = f"{feedback} {note}" if feedback else note
+                review = review.model_copy(update={"verdict": "SEND_BACK", "feedback": feedback})
         # Copy the round rather than mutating state in place.
         new_rounds = [*rounds[:-1], last.model_copy(update={"review": review})]
         return {"rounds": new_rounds}
@@ -126,7 +115,8 @@ def finish_node(state: ApprovalState) -> dict:
     else:
         # The agents could not settle within the round limit, so a human decides.
         decision = "NEEDS_HUMAN_REVIEW"
-        feedback = review.feedback if review else None
+        # Fall back to the VP's reasoning when it gave no feedback text.
+        feedback = (review.feedback or review.reasoning) if review else "no VP review"
         reasoning = f"VP not satisfied after {MAX_ROUNDS} rounds: {feedback}"
     outcome = ApprovalOutcome(
         decision=decision, reasoning=reasoning, rounds=rounds, open_questions=_dedupe(questions),

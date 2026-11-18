@@ -1,7 +1,7 @@
 """Tests for the analyst/VP critique-loop subgraph, driven by scripted fake agents."""
 from decimal import Decimal
 
-from invoice_agent.approval.policy import CHECKLIST_KEYS
+from invoice_agent.approval.policy import APPROVAL_POLICY, CHECKLIST_KEYS
 from invoice_agent.approval.subgraph import ApprovalContext, build_approval_graph
 from invoice_agent.models import Invoice
 from tests.fakes import ScriptedAnalyst, ScriptedVP, make_recommendation, make_review
@@ -11,7 +11,8 @@ FULL = {k: "ok" for k in CHECKLIST_KEYS}
 
 def run(analyst, vp, total="5000"):
     """Run the subgraph on an invoice with the given total and return the outcome."""
-    ctx = ApprovalContext(invoice=Invoice(total=Decimal(total)), policy="p")
+    ctx = ApprovalContext(
+        invoice=Invoice(total=Decimal(total)), flags=[], uncertainties=[], policy=APPROVAL_POLICY)
     out = build_approval_graph(analyst, vp).invoke({"context": ctx, "rounds": [], "outcome": None})
     return out["outcome"]
 
@@ -108,3 +109,23 @@ def test_open_questions_deduplicated_in_order():
     o = run(a, v)
     assert o.open_questions == ["q1", "q2", "q4", "q3", "q5"]
     assert len(a.calls) == 2
+
+
+def test_accept_without_decision_and_incomplete_checklist_reports_both():
+    """Both problems are put in one round's feedback so no round is wasted."""
+    a = ScriptedAnalyst([make_recommendation() for _ in range(3)])
+    v = ScriptedVP([make_review(final_decision=None, feedback="hm") for _ in range(3)])
+    o = run(a, v, total="15000")
+    fb = o.rounds[0].review.feedback
+    assert "without a final decision" in fb and "checklist incomplete" in fb and fb.startswith("hm")
+    assert len(a.calls) == 3 and len(v.calls) == 3
+
+
+def test_needs_human_review_reasoning_falls_back_when_no_feedback():
+    """With no feedback text, the human-review reasoning uses the VP's reasoning, not 'None'."""
+    sb = make_review(verdict="SEND_BACK", final_decision=None, feedback=None)
+    a = ScriptedAnalyst([make_recommendation() for _ in range(3)])
+    v = ScriptedVP([sb, sb, sb])
+    o = run(a, v)
+    assert o.reasoning == "VP not satisfied after 3 rounds: vp reasoning"
+    assert len(a.calls) == 3
