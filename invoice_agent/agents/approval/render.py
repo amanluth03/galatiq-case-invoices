@@ -1,8 +1,16 @@
 """Turns an ApprovalContext and earlier rounds into the plain-text briefing the analyst and VP agents read.
 Pure formatting, no LLM calls; used by agents/analyst and agents/vp in the approval stage.
+Vendor-derived text is fenced in <invoice_data> and earlier agent text in <prior_rounds> (prompt-injection defence);
+the policy is not here, it goes in the agents' system prompts.
 """
 from invoice_agent.agents.approval.loop import ApprovalContext
 from invoice_agent.models import Invoice, Recommendation, Round, VPReview
+
+
+def _fence(tag: str, lines: list[str]) -> list[str]:
+    """Wrap data lines in <tag>...</tag>; any "<" inside the data becomes "‹", so it cannot fake or close a fence."""
+    body = "\n".join(lines).replace("<", "‹")
+    return [f"<{tag}>", body, f"</{tag}>"]
 
 
 def _v(value) -> str:
@@ -57,21 +65,25 @@ def _review_lines(review: VPReview, indent: str = "  ") -> list[str]:
 
 
 def render_context(ctx: ApprovalContext, rounds: list[Round], recommendation: Recommendation | None = None) -> str:
-    """Render invoice, flags, uncertainties, the policy and reviewed earlier rounds; plus the draft to review (VP)."""
-    parts = ["## Invoice", *_invoice_lines(ctx.invoice), "", "## Validation flags"]
-    parts += [f"- [{f.severity}] {f.code}: {f.message}" + (f" (field: {f.field_path})" if f.field_path else "")
-              for f in ctx.flags] or ["- none"]
-    parts += ["", "## Where the extraction was uncertain"]
-    parts += [f"- {u.field_path} ({u.confidence} confidence): {u.reason}"
-              + (f" — source text {u.raw!r}, read as {u.normalized!r}" if u.raw or u.normalized else "")
-              for u in ctx.uncertainties] or ["- none"]
+    """Render the fenced invoice data (invoice, flags, uncertainties), reviewed earlier rounds, and the draft to review (VP)."""
+    # Flags and uncertainties quote item names and raw invoice text, so they are vendor data too.
+    data = ["## Invoice", *_invoice_lines(ctx.invoice), "", "## Validation flags"]
+    data += [f"- [{f.severity}] {f.code}: {f.message}" + (f" (field: {f.field_path})" if f.field_path else "")
+             for f in ctx.flags] or ["- none"]
+    data += ["", "## Where the extraction was uncertain"]
+    data += [f"- {u.field_path} ({u.confidence} confidence): {u.reason}"
+             + (f" — source text {u.raw!r}, read as {u.normalized!r}" if u.raw or u.normalized else "")
+             for u in ctx.uncertainties] or ["- none"]
+    parts = _fence("invoice_data", data)
     # Only rounds the VP has already reviewed are history; the VP's current draft is shown separately below.
     reviewed = [r for r in rounds if r.review is not None]
     if reviewed:
-        parts += ["", "## Previous rounds"]
+        history = []
         for r in reviewed:
-            parts += [f"Round {r.number}:", *_recommendation_lines(r.recommendation), *_review_lines(r.review)]
+            history += [f"Round {r.number}:", *_recommendation_lines(r.recommendation), *_review_lines(r.review)]
+        parts += ["", "## Previous rounds", *_fence("prior_rounds", history)]
     if recommendation is not None:
-        parts += ["", "## Analyst recommendation to review", *_recommendation_lines(recommendation)]
-    parts += ["", "## Approval policy", ctx.policy.strip()]
+        # The draft may quote vendor text, so it gets the same neutralizing fence.
+        parts += ["", "## Analyst recommendation to review",
+                  *_fence("analyst_recommendation", _recommendation_lines(recommendation))]
     return "\n".join(parts)

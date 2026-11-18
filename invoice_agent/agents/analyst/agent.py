@@ -15,12 +15,17 @@ def make_analyst(model, tools: dict[str, BaseTool]) -> AnalystFn:
     # ToolStrategy: the answer comes back as a tool call, so Grok can use real tools and structured output together.
     agent = create_agent(
         model, tools=[tools[name] for name in ANALYST_TOOLS],
-        response_format=ToolStrategy(Recommendation), system_prompt=ANALYST_PROMPT,
+        response_format=ToolStrategy(Recommendation),
     )
 
     def analyst(ctx: ApprovalContext, rounds: list[Round]) -> Recommendation:
         """Brief the agent on the invoice and earlier rounds, and return its Recommendation."""
-        result = agent.invoke({"messages": [{"role": "user", "content": render_context(ctx, rounds)}]})
+        # The policy goes in the system message (trusted); the user message holds only fenced invoice data.
+        system = f"{ANALYST_PROMPT}\n\n{ctx.policy.strip()}"
+        result = agent.invoke({"messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": render_context(ctx, rounds)},
+        ]})
         return result["structured_response"]
 
     return analyst
