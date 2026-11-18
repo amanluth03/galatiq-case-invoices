@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from invoice_agent.agents.llm import MissingApiKey
 from invoice_agent.infra import db
@@ -28,13 +29,14 @@ def _amount(state: PipelineState) -> str:
 def _invoice_no(state: PipelineState) -> str:
     """The invoice number, falling back to the file name when extraction produced none."""
     inv = state.get("invoice")
-    return (inv.invoice_number if inv is not None and inv.invoice_number else None) or Path(state["source_path"]).name
+    number = (inv.invoice_number if inv is not None and inv.invoice_number else None) or Path(state["source_path"]).name
+    return _one_line(number, 40)
 
 
 def _vendor(state: PipelineState) -> str:
     """The vendor name, or a dash when unknown."""
     inv = state.get("invoice")
-    return (inv.vendor if inv is not None and inv.vendor else None) or "-"
+    return _one_line((inv.vendor if inv is not None and inv.vendor else None) or "-", 60)
 
 
 def _one_line(text: str, width: int = 90) -> str:
@@ -46,16 +48,22 @@ def _one_line(text: str, width: int = 90) -> str:
 def show_panel(state: PipelineState) -> None:
     """Print one run as a panel: invoice no., vendor, amount, outcome, why, decided by."""
     final = state["final"]
-    body = (f"Invoice:    {_invoice_no(state)}\nVendor:     {_vendor(state)}\nAmount:     {_amount(state)}\n"
-            f"Outcome:    {final.status}\nWhy:        {final.reasoning}\nDecided by: {final.decided_by}")
-    console.print(Panel(body, title=Path(state["source_path"]).name))
+    # Text (not a str) everywhere: vendor/LLM-controlled values must never be parsed as rich markup.
+    body = Text()
+    for label, value in (("Invoice", _invoice_no(state)), ("Vendor", _vendor(state)), ("Amount", _amount(state)),
+                         ("Outcome", final.status), ("Why", _one_line(final.reasoning, 300)),
+                         ("Decided by", final.decided_by)):
+        body.append(f"{label + ':':<12}")
+        body.append(value + "\n" if label != "Decided by" else value)
+    console.print(Panel(body, title=Text(Path(state["source_path"]).name)))
 
 
 def show_table(states: list[PipelineState]) -> None:
     """Print a batch as a table, one row per invoice."""
     table = Table("Invoice", "Vendor", "Amount", "Outcome", "Why")
     for s in states:
-        table.add_row(_invoice_no(s), _vendor(s), _amount(s), s["final"].status, _one_line(s["final"].reasoning))
+        table.add_row(*(Text(c) for c in (_invoice_no(s), _vendor(s), _amount(s), s["final"].status,
+                                          _one_line(s["final"].reasoning))))
     console.print(table)
 
 
@@ -70,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)  # argparse itself exits 2 on bad flags
 
     if args.serve:
+        if args.reset:
+            # Reset first so the server starts on clean databases.
+            db.reset(load_settings())
+            print("Databases reset")
         # Task 11 replaces this with the real review server.
         print("Review screen arrives in Task 11")
         return 0
@@ -83,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     if args.reset:
         db.reset(settings)
+        print("Databases reset")
     if not args.invoice_path and not args.invoice_dir:
         return 0
     try:

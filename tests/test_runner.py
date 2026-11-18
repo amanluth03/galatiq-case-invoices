@@ -1,4 +1,5 @@
 """Tests for the runner: batch processing, dedupe, re-run policy and error containment, using fake agents and a tmp database."""
+import logging
 import shutil
 from decimal import Decimal
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps, build_graph, make_serializer
 from invoice_agent.infra import db
 from invoice_agent.infra.logging_setup import setup_logging
@@ -39,7 +41,21 @@ def conn(tmp_path):
     c.close()
 
 
-def build(conn, extractions, n_approvals=10, send_back=False):
+@pytest.fixture
+def clean_logger():
+    """Remove the handlers setup_logging adds to the invoice_agent logger once the test is over."""
+    logger = logging.getLogger("invoice_agent")
+    saved = (list(logger.handlers), logger.propagate, logger.level)
+    yield
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+    for h in saved[0]:
+        logger.addHandler(h)
+    logger.propagate, logger.level = saved[1], saved[2]
+
+
+def build(conn, extractions, n_approvals=10, send_back=False, checklist=None):
     """Fake deps and graph; extractions are scripted ingestion responses, agents approve (or always send back)."""
     pay = RecordingPay()
     ex = ScriptedIngestionAgent(extractions)
@@ -47,7 +63,7 @@ def build(conn, extractions, n_approvals=10, send_back=False):
         reviews = [make_review(verdict="SEND_BACK", final_decision=None, feedback="again")] * (3 * n_approvals)
     else:
         reviews = [make_review()] * n_approvals
-    deps = Deps(ingestion=ex, analyst=ScriptedAnalyst([make_recommendation()] * (3 * n_approvals)),
+    deps = Deps(ingestion=ex, analyst=ScriptedAnalyst([make_recommendation(checklist=checklist)] * (3 * n_approvals)),
                 vp=ScriptedVP(reviews), pay=pay, conn=conn)
     return deps, build_graph(deps, InMemorySaver(serde=make_serializer())), pay
 
@@ -159,7 +175,50 @@ def test_paused_run_can_be_resumed(conn):
     assert len(pay.calls) == 1
 
 
-def test_node_records_are_logged(conn, tmp_path):
+def test_rerun_of_human_rejected_file_keeps_rejection(conn):
+    """A run a human REJECTED is not re-run, so approving agents cannot overturn the human's decision."""
+    deps, graph, pay = build(conn, [make_extracted()], send_back=True)
+    paused = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    resume_review(paused["run_id"], "REJECT", "no", None, deps, graph)
+    again = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert again["final"].status == "REJECTED" and again["final"].decided_by == "human"
+    assert len(deps.ingestion.calls) == 1 and len(pay.calls) == 0
+
+
+def test_crash_after_pay_is_not_paid_twice(conn, monkeypatch):
+    """If saving fails right after pay succeeded, the re-run recovers the PAID checkpoint instead of paying again."""
+    deps, graph, pay = build(conn, [make_extracted()])
+    real_save, failed = db.save_run, []
+
+    def flaky_save(c, state):
+        """Fail the first save only, like a crash between pay and the final save."""
+        if not failed:
+            failed.append(1)
+            raise RuntimeError("disk full")
+        real_save(c, state)
+
+    monkeypatch.setattr(db, "save_run", flaky_save)
+    first = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert first["final"].status == "ERROR" and len(pay.calls) == 1
+    again = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert again["final"].status == "PAID" and again["run_id"] == first["run_id"]
+    assert len(pay.calls) == 1 and db.get_run(conn, first["run_id"])["status"] == "PAID"
+
+
+def test_rerun_of_rejected_has_no_stale_flags(conn):
+    """A REJECTED run (with its flags) re-run with a clean extraction ends PAID and carries none of the old flags."""
+    from tests.test_graph import extracted_1002
+    deps, graph, _ = build(conn, [extracted_1002(), make_extracted()],
+                          checklist={k: "checked" for k in CHECKLIST_KEYS})
+    first = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert first["final"].status == "REJECTED" and first["flags"]
+    second = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert second["final"].status == "PAID" and second["run_id"] == first["run_id"]
+    assert not any(f.severity == "must_reject" for f in second["flags"])
+    assert not (db.get_run(conn, first["run_id"])["state"].get("guardrail_outcome"))
+
+
+def test_node_records_are_logged(conn, tmp_path, clean_logger):
     """Each graph node writes one node_completed record with run_id, node and duration to run.jsonl."""
     import json
     setup_logging(tmp_path / "logs")

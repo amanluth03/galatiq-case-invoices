@@ -2,7 +2,23 @@
 import json
 import logging
 
+import pytest
+
 from invoice_agent.infra.logging_setup import RUN_LOGGER, setup_logging
+
+
+@pytest.fixture(autouse=True)
+def clean_logger():
+    """Remove the handlers setup_logging adds to the invoice_agent logger once each test is over."""
+    logger = logging.getLogger("invoice_agent")
+    saved = (list(logger.handlers), logger.propagate, logger.level)
+    yield
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+    for h in saved[0]:
+        logger.addHandler(h)
+    logger.propagate, logger.level = saved[1], saved[2]
 
 
 def test_records_are_written_as_json_lines(tmp_path):

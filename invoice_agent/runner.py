@@ -23,7 +23,7 @@ from invoice_agent.models import (
     ApprovalOutcome, FinalOutcome, Flag, HumanDecision, Invoice, PipelineState, Uncertainty,
 )
 from invoice_agent.utils.payments import mock_payment
-from invoice_agent.utils.reader import _FORMATS, read_file
+from invoice_agent.utils.reader import SUPPORTED_SUFFIXES, read_file
 
 log = logging.getLogger(RUN_LOGGER)
 
@@ -74,10 +74,24 @@ def _summary(update) -> dict:
     return summary
 
 
-def _error_state(run_id: str, path: Path, exc: Exception) -> PipelineState:
+def _error_state(run_id: str, path: Path, exc: Exception, content_hash: str | None) -> PipelineState:
     """A saved-able ERROR state for a file that crashed outside the graph's own handlers."""
-    return {"run_id": run_id, "source_path": str(path),
+    # content_hash lets a re-run find this row and reuse the run id (and its checkpoint) instead of starting anew.
+    state: PipelineState = {"run_id": run_id, "source_path": str(path),
             "final": FinalOutcome(status="ERROR", decided_by="system", reasoning=str(exc) or type(exc).__name__)}
+    if content_hash:
+        state["content_hash"] = content_hash
+    return state
+
+
+def _paid_checkpoint(graph, run_id: str) -> PipelineState | None:
+    """The checkpointed state of a thread if it already ended PAID, else None."""
+    try:
+        state = dict(graph.get_state({"configurable": {"thread_id": run_id}}).values)
+    except Exception:
+        return None
+    final = state.get("final")
+    return state if final is not None and final.status == "PAID" else None  # type: ignore[return-value]
 
 
 def _finish(graph, config: dict, run_id: str, paused: bool, deps: Deps) -> PipelineState:
@@ -96,12 +110,22 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
     """Run one invoice file through the graph and save the result; never raises for a bad file."""
     path = Path(path)
     run_id = uuid.uuid4().hex[:12]
+    content_hash = None
     try:
         # Re-processing policy: look the file up by content, so the same bytes keep the same run id.
-        existing = db.find_run_by_content_hash(deps.conn, read_file(path).content_hash)
+        content_hash = read_file(path).content_hash
+        existing = db.find_run_by_content_hash(deps.conn, content_hash)
         if existing:
-            if existing["status"] in _KEEP_STATUSES:
+            # A human's decision (even a rejection) is never overturned by re-running the agents.
+            decided_by = (existing["state"].get("final") or {}).get("decided_by")
+            if existing["status"] in _KEEP_STATUSES or decided_by == "human":
                 return _hydrate(existing["state"])
+            # A crash after pay but before the final save leaves ERROR in the DB while the checkpoint says PAID:
+            # recover that result instead of re-running, so the vendor is never paid twice.
+            saved = _paid_checkpoint(graph, existing["run_id"])
+            if saved is not None:
+                db.save_run(deps.conn, saved)
+                return saved
             # REJECTED / ERROR / DUPLICATE: re-run under the same id so the new result replaces the old row.
             run_id = existing["run_id"]
     except Exception:
@@ -124,7 +148,7 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
         return _finish(graph, config, run_id, paused, deps)
     except Exception as exc:
         log.warning("run failed", extra={"fields": {"run_id": run_id, "error": str(exc)}})
-        state = _error_state(run_id, path, exc)
+        state = _error_state(run_id, path, exc, content_hash)
         db.save_run(deps.conn, state)
         return state
 
@@ -132,7 +156,7 @@ def process_file(path: Path, deps: Deps, graph) -> PipelineState:
 def process_dir(dir: Path, deps: Deps, graph) -> list[PipelineState]:
     """Process every supported file in a directory, in filename order, one after another."""
     # Sequential and sorted so invoice_1004.json is saved before invoice_1004_revised.json is checked against it.
-    files = sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in _FORMATS)
+    files = sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
     return [process_file(p, deps, graph) for p in files]
 
 

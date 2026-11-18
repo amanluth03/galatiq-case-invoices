@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 # Scanned PDFs have no text layer; OCR is out of scope, so we report an issue instead of guessing.
 NO_TEXT_ISSUE = "no text layer — scanned PDF not supported"
-_FORMATS = {".pdf", ".txt", ".json", ".csv", ".xml"}
+# Public so the runner can pick the files a directory scan should process.
+SUPPORTED_SUFFIXES = {".pdf", ".txt", ".json", ".csv", ".xml"}
 
 
 class UnsupportedFormatError(ValueError):
@@ -40,7 +41,7 @@ def read_file(path: Path) -> ReadResult:
     """Read an invoice file of a supported format into a ReadResult."""
     path = Path(path)
     suffix = path.suffix.lower()
-    if suffix not in _FORMATS:
+    if suffix not in SUPPORTED_SUFFIXES:
         raise UnsupportedFormatError(f"unsupported file extension: {path.suffix!r}")
     fmt = suffix[1:]
     issues: list[str] = []
