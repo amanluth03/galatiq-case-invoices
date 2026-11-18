@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
-from invoice_agent.graph import Deps, build_graph
+from invoice_agent.graph import Deps, build_graph, make_serializer
 from invoice_agent.infra import db
 from invoice_agent.models import ExtractedField, ExtractedLineItem
 from invoice_agent.utils.normalize import to_invoice
@@ -62,7 +62,7 @@ def make_graph(conn, extractor, analyst, vp):
     """Build the pipeline with fakes and an in-memory checkpointer; returns (graph, pay fake)."""
     pay = RecordingPay()
     deps = Deps(extractor=extractor, analyst=analyst, vp=vp, pay=pay, conn=conn)
-    return build_graph(deps, InMemorySaver()), pay
+    return build_graph(deps, InMemorySaver(serde=make_serializer())), pay
 
 
 def run(graph, name, run_id="run-1"):
@@ -303,3 +303,33 @@ def test_pay_refuses_missing_vendor_or_total(conn, field):
     assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
     assert out["final"].reasoning == "cannot pay: missing vendor/total"
     assert len(pay.calls) == 0
+
+
+def test_sqlite_checkpoint_round_trip_has_no_unregistered_types(conn, tmp_path):
+    """Pausing and resuming through SqliteSaver restores our models with no "unregistered type" warning or block."""
+    import sqlite3
+
+    from langgraph.checkpoint.serde.event_hooks import register_serde_event_listener
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    from invoice_agent.models import FinalOutcome, HumanDecision
+
+    events = []
+    # Serde events fire on every load (the log warning fires only once per process), so this is order-independent.
+    unregister = register_serde_event_listener(events.append)
+    cp = sqlite3.connect(tmp_path / "checkpoints.db", check_same_thread=False)
+    try:
+        ex = ScriptedExtractor([extracted_1002()])
+        a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)] * 3)
+        pay = RecordingPay()
+        deps = Deps(extractor=ex, analyst=a, vp=ScriptedVP(send_backs()), pay=pay, conn=conn)
+        graph = build_graph(deps, SqliteSaver(cp, serde=make_serializer()))
+        _, config = run(graph, "invoice_1002.txt")
+        out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "ok", "justification": "agreed"}), config)
+        state = graph.get_state(config).values
+    finally:
+        unregister()
+        cp.close()
+    assert out["final"].status == "PAID" and len(pay.calls) == 1
+    assert isinstance(state["final"], FinalOutcome) and isinstance(state["human_decision"], HumanDecision)
+    assert [e for e in events if e["kind"] in ("msgpack_unregistered_allowed", "msgpack_blocked")] == []

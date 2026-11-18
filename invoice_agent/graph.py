@@ -1,16 +1,20 @@
 """The top-level pipeline graph: read -> extract -> validate -> approval -> guardrail -> pay / log_rejection / human_review.
 Code decides every step; the LLM roles (extractor, analyst, VP) and payment are injected through Deps so tests can use fakes.
 """
+import inspect
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Literal
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
+
+from invoice_agent import models
 
 from invoice_agent.agents.approval.loop import AnalystFn, ApprovalContext, VPFn, build_approval_graph
 from invoice_agent.agents.approval.policy import APPROVAL_POLICY
@@ -40,6 +44,15 @@ def _error_text(exc: Exception) -> str:
 def _has_must_reject(state: PipelineState) -> bool:
     """True when validation raised at least one must_reject flag."""
     return any(f.severity == "must_reject" for f in state.get("flags", []))
+
+
+def make_serializer() -> JsonPlusSerializer:
+    """Checkpoint serializer that explicitly allows our own pydantic types (every checkpointer for build_graph uses it)."""
+    # LangGraph warns on (and will soon block) restoring unregistered classes from a checkpoint,
+    # so list every model in invoice_agent.models plus the approval loop's ApprovalContext.
+    ours = [cls for _, cls in inspect.getmembers(models, inspect.isclass)
+            if issubclass(cls, BaseModel) and cls.__module__ == models.__name__]
+    return JsonPlusSerializer(allowed_msgpack_modules=[*ours, ApprovalContext])
 
 
 # Keys a run produces. read clears them so a re-run on the same thread_id never sees the last run's results.
