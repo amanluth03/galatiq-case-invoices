@@ -32,3 +32,5 @@ packages = ["invoice_agent", "invoice_agent.ingest"]
 [tool.pytest.ini_options]
 markers = ["live: calls the real xAI API"]
 addopts = "-m 'not live'"
+# Lets tests import shared helpers as tests.fakes.
+pythonpath = ["."]
