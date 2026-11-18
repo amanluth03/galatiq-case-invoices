@@ -1,0 +1,8 @@
+CONTEXT.md
+.env
+docs/superpowers/
+var/
+__pycache__/
+.venv/
+.pytest_cache/
+*.egg-info/
