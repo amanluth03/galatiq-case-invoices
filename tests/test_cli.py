@@ -32,10 +32,10 @@ def test_cli_missing_file_exits_2(tmp_path):
     assert run_cli(tmp_path, "--invoice_path=nope.txt").returncode == 2
 
 
-def test_cli_serve_placeholder(tmp_path):
-    """--serve prints the Task 11 placeholder and exits 0."""
+def test_cli_serve_missing_key_exits_2(tmp_path):
+    """--serve without XAI_API_KEY refuses to start (it could not resume reviews) and exits 2."""
     result = run_cli(tmp_path, "--serve")
-    assert result.returncode == 0 and "Review screen arrives in Task 11" in result.stdout
+    assert result.returncode == 2 and "XAI_API_KEY is not set" in result.stderr
 
 
 def test_cli_reset_reports_and_exits_0(tmp_path):
@@ -48,11 +48,11 @@ def test_cli_reset_reports_and_exits_0(tmp_path):
 
 
 def test_cli_serve_with_reset_resets_first(tmp_path):
-    """--serve --reset performs the reset before the (placeholder) serve."""
+    """--serve --reset performs the reset before starting the server (which then stops: the test has no API key)."""
     (tmp_path / "var").mkdir()
     (tmp_path / "var" / "app.db").write_text("x")
     result = run_cli(tmp_path, "--serve", "--reset")
-    assert result.returncode == 0 and "Databases reset" in result.stdout
+    assert result.returncode == 2 and "Databases reset" in result.stdout
     assert not (tmp_path / "var" / "app.db").exists()
 
 

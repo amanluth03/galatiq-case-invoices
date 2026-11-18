@@ -1,0 +1,214 @@
+{#- One invoice: plain verdict, the decision panel (only when awaiting review), the source document beside the
+    extracted fields and flags, the over-$10K checklist, open questions and the analyst/VP timeline. -#}
+{% extends "base.html" %}
+{% block title %}{{ inv.number }}{% endblock %}
+{% block content %}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="/">← All invoices</a></nav>
+
+{% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
+
+<header class="inv-head">
+  <div class="inv-id">
+    <span class="pill pill-{{ inv.status | lower }}">{{ inv.status_label }}</span>
+    <h1>{{ inv.number }}</h1>
+    <p class="inv-meta">
+      <span class="vendor">{{ inv.vendor }}</span>
+      <span>Issued {{ inv.invoice_date }}</span>
+      <span>Due {{ inv.due_date }}</span>
+      <span class="file">{{ inv.file_name }}</span>
+    </p>
+  </div>
+  <div class="inv-amount">
+    <span class="label">Invoice total</span>
+    <span class="big num">{{ inv.amount }}</span>
+  </div>
+</header>
+
+<section class="verdict verdict-{{ inv.status | lower }}" aria-labelledby="verdict">
+  <h2 id="verdict" class="verdict-line">{{ inv.verdict }}</h2>
+  {#- No whitespace inside: the paragraph keeps the reasoning's own line breaks (pre-line). -#}
+  <p class="verdict-why">
+    {%- if inv.status == "ERROR" %}<span class="label-inline">What went wrong:</span> {% endif -%}
+    {{ inv.reasoning | trim }}</p>
+  {% if inv.human_note and inv.human_note != inv.reasoning %}
+  <p class="verdict-note"><span class="label-inline">Reviewer note:</span> {{ inv.human_note }}</p>
+  {% endif %}
+  <p class="verdict-meta">
+    {% if inv.awaiting %}Waiting on your decision — nothing has been paid.
+    {% else %}Decided by {{ inv.decided_by }}.{% if inv.paid %} Payment sent.{% endif %}{% endif %}
+    {% if inv.duplicate_of %}<a href="/invoices/{{ inv.duplicate_of }}">Open the original invoice</a>{% endif %}
+  </p>
+</section>
+
+{% if inv.awaiting %}
+<section class="decide card" id="decide" aria-labelledby="decide-title">
+  <h2 id="decide-title">Your decision</h2>
+  <p class="lede">Approving pays <strong class="num">{{ inv.approve_amount }}</strong> to {{ inv.vendor }} now. Rejecting logs the invoice and nothing is paid.</p>
+  {% if error %}<div class="form-error" role="alert" id="form-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/invoices/{{ inv.run_id }}/decision">
+    {% if inv.blocking %}
+    <div class="warn">
+      <p class="warn-title">Blocked: {{ inv.blocking_summary }}</p>
+      <ul>
+        {% for b in inv.blocking %}<li><strong>{{ b.title }}</strong> — {{ b.message }}</li>{% endfor %}
+      </ul>
+      <p>Approving overrides these checks, so you'll need to say why.</p>
+    </div>
+    <div class="field">
+      <label for="justification">Justification <span class="req">required to approve</span></label>
+      <textarea id="justification" name="justification" rows="3" aria-describedby="justification-hint"
+        {% if error %}aria-invalid="true" autofocus{% endif %}>{{ form.justification }}</textarea>
+      <p class="hint" id="justification-hint">For example: “Backorder agreed with the vendor by phone; delivery in two batches.”</p>
+    </div>
+    {% endif %}
+    <div class="field">
+      <label for="note">Note for the record <span class="opt">optional</span></label>
+      <textarea id="note" name="note" rows="2">{{ form.note }}</textarea>
+    </div>
+    <div class="actions">
+      <button type="submit" name="decision" value="APPROVE" class="btn btn-approve">Approve and pay {{ inv.approve_amount }}</button>
+      <button type="submit" name="decision" value="REJECT" class="btn btn-reject">Reject invoice</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
+<div class="cols">
+  <section class="card doc-pane" aria-labelledby="doc-title">
+    <div class="card-head">
+      <h2 id="doc-title">Source document</h2>
+      {% if inv.source and inv.uncertain_count %}
+      <p class="legend"><mark class="conf-low">Unsure</mark> <mark class="conf-medium">Somewhat sure</mark> <span>Hover a highlight for why.</span></p>
+      {% endif %}
+    </div>
+    {% if inv.source %}
+    <pre class="doc" tabindex="0" aria-label="Original invoice text">{{ inv.source }}</pre>
+    {% if not inv.uncertain_count %}<p class="hint">The reader was confident about every value in this document.</p>{% endif %}
+    {% else %}
+    <p class="muted">The file couldn't be read, so there's no text to show.</p>
+    {% endif %}
+  </section>
+
+  <div class="facts">
+    <section class="card" aria-labelledby="issues-title">
+      <h2 id="issues-title">What the checks found</h2>
+      {% if inv.flag_groups %}
+        {% for g in inv.flag_groups %}
+        <div class="flag-group sev-{{ g.severity }}">
+          <h3><span class="sev-badge sev-{{ g.severity }}">{{ g.title }}</span> <span class="hint">{{ g.hint }}</span></h3>
+          <ul class="flags">
+            {% for f in g.flags %}<li><span class="flag-title">{{ f.title }}</span><span class="flag-msg">{{ f.message }}</span></li>{% endfor %}
+          </ul>
+        </div>
+        {% endfor %}
+      {% elif inv.status == "ERROR" %}
+        <p class="muted">No checks ran because the file couldn't be processed.</p>
+      {% else %}
+        <p class="ok">No issues — every check passed.</p>
+      {% endif %}
+    </section>
+
+    {% if inv.fields %}
+    <section class="card" aria-labelledby="fields-title">
+      <h2 id="fields-title">What we read from it</h2>
+      <table class="kv">
+        <tbody>
+          {% for f in inv.fields %}
+          <tr{% if f.unc %} class="tint conf-{{ f.unc.confidence }}"{% endif %}>
+            <th scope="row">{{ f.label }}</th>
+            <td{% if f.money %} class="num"{% endif %}>{{ f.value }}
+              {% if f.unc %}
+              <div class="unc"><span class="conf-badge conf-{{ f.unc.confidence }}">{{ f.unc.label }}</span>
+                {% if f.unc.raw %}Document says <q class="raw">{{ f.unc.raw }}</q>. {% endif %}{{ f.unc.reason }}</div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
+    {% if inv.lines %}
+    <section class="card" aria-labelledby="lines-title">
+      <h2 id="lines-title">Line items</h2>
+      <div class="table-scroll">
+        <table class="lines">
+          <thead><tr><th scope="col">Item</th><th scope="col" class="num">Qty</th><th scope="col" class="num">Unit price</th><th scope="col" class="num">Line total</th></tr></thead>
+          <tbody>
+            {% for l in inv.lines %}
+            <tr{% if l.severity %} class="line-{{ l.severity }}"{% endif %}>
+              <td{% if l.unc.name %} class="tint conf-{{ l.unc.name.confidence }}" title="{{ l.unc.name.reason }}"{% endif %}>
+                <span class="item-name">{{ l.name }}</span>
+                {% if l.sku %}<span class="item-sub">Matched to {{ l.sku }}</span>{% endif %}
+                {% if l.suggestion %}<span class="item-sub">Closest match: {{ l.suggestion }} (not applied)</span>{% endif %}
+                {% if l.note %}<span class="item-sub">Note: {{ l.note }}</span>{% endif %}
+              </td>
+              {% for key, value in (("qty", l.qty), ("unit_price", l.unit_price), ("line_total", l.line_total)) %}
+              <td class="num{% if l.unc[key] %} tint conf-{{ l.unc[key].confidence }}{% endif %}"{% if l.unc[key] %} title="{{ l.unc[key].reason }}"{% endif %}>{{ value }}</td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if inv.checklist %}
+    <section class="card" aria-labelledby="checklist-title">
+      <h2 id="checklist-title">Over-$10K checklist</h2>
+      <p class="hint">The analyst must answer each item before the VP can sign off on an invoice this size.</p>
+      <dl class="checklist">
+        {% for c in inv.checklist %}
+        <div class="check{% if not c.answer %} check-missing{% endif %}">
+          <dt>{{ c.label }}</dt>
+          <dd>{{ c.answer or "Not answered" }}</dd>
+        </div>
+        {% endfor %}
+      </dl>
+    </section>
+    {% endif %}
+
+    {% if inv.open_questions %}
+    <section class="card" aria-labelledby="questions-title">
+      <h2 id="questions-title">Open questions</h2>
+      <p class="hint">What the agents couldn't settle from the documents alone.</p>
+      <ul class="questions">
+        {% for q in inv.open_questions %}<li>{{ q }}</li>{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </div>
+</div>
+
+{% if inv.rounds %}
+<details class="card timeline">
+  <summary><h2>How the agents decided</h2> <span class="hint">{{ inv.rounds | length }} round{{ "s" if inv.rounds | length != 1 }} between the analyst and the VP</span></summary>
+  <ol class="rounds">
+    {% for r in inv.rounds %}
+    <li class="round">
+      <h3>Round {{ r.number }}</h3>
+      <div class="turn">
+        <p class="who">Analyst <span class="tag tag-{{ r.decision | lower }}">recommends {{ "approving" if r.decision == "APPROVE" else "rejecting" }}</span></p>
+        <p class="said">{{ r.reasoning }}</p>
+        {% if r.evidence %}
+        <ul class="evidence">{% for e in r.evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+      {% if r.review %}
+      <div class="turn turn-vp">
+        <p class="who">VP
+          {% if r.review.accepted %}<span class="tag tag-{{ (r.review.final_decision or '') | lower }}">agreed — {{ "approve" if r.review.final_decision == "APPROVE" else "reject" }}</span>
+          {% else %}<span class="tag tag-back">sent it back</span>{% endif %}
+        </p>
+        <p class="said">{{ r.review.reasoning }}</p>
+        {% if r.review.feedback and not r.review.accepted %}<p class="said feedback"><span class="label-inline">Asked for:</span> {{ r.review.feedback }}</p>{% endif %}
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</details>
+{% endif %}
+{% endblock %}

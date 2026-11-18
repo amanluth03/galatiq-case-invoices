@@ -1,0 +1,23 @@
+{#- Shared page shell for the review screen: top bar, main container and the offline stylesheet. -#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Invoice review{% endblock %} · Acme Accounts Payable</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Invoice review</a>
+      <span class="brand-sub">Acme Corp · Accounts payable</span>
+    </div>
+  </header>
+  <main id="main" class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

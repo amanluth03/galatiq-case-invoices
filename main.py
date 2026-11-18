@@ -1,4 +1,4 @@
-"""Command-line entry point: process one invoice or a directory, then print the outcome (panel or table).
+"""Command-line entry point: process one invoice or a directory and print the outcome, or start the review screen (--serve).
 Exit codes: 0 ok, 2 bad arguments or missing XAI_API_KEY.
 """
 import argparse
@@ -67,6 +67,26 @@ def show_table(states: list[PipelineState]) -> None:
     console.print(table)
 
 
+def serve(port: int) -> int:
+    """Start the review screen on localhost with the real runtime; returns the exit code (2 without an API key)."""
+    # Imported here so plain CLI runs don't pay for loading the web stack.
+    import uvicorn
+
+    from invoice_agent.web.app import create_app
+
+    settings = load_settings()
+    try:
+        deps, graph = build_runtime(settings)
+    except MissingApiKey as exc:
+        # Resuming a review runs the rest of the graph, so the server needs the same key as the CLI.
+        print(str(exc), file=sys.stderr)
+        return 2
+    setup_logging(settings.log_dir)
+    console.print(f"Review screen → http://localhost:{port}")
+    uvicorn.run(create_app(deps, graph, deps.conn), host="127.0.0.1", port=port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, run the requested files and print results; returns the exit code."""
     parser = argparse.ArgumentParser(description="Process invoices through the approval pipeline.")
@@ -82,9 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             # Reset first so the server starts on clean databases.
             db.reset(load_settings())
             print("Databases reset")
-        # Task 11 replaces this with the real review server.
-        print("Review screen arrives in Task 11")
-        return 0
+        return serve(args.port)
     if not args.invoice_path and not args.invoice_dir and not args.reset:
         parser.error("give --invoice_path or --invoice_dir")
     if args.invoice_path and not Path(args.invoice_path).is_file():

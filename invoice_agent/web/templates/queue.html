@@ -1,0 +1,59 @@
+{#- The invoice queue: dollar exposure up top, then every processed invoice (awaiting review first). -#}
+{% extends "base.html" %}
+{% block title %}Invoices{% endblock %}
+{% block content %}
+<section class="queue-head" aria-labelledby="queue-title">
+  <div class="queue-summary">
+    <h1 id="queue-title">Invoices</h1>
+    {% if rows %}
+    <ul class="totals" aria-label="Totals">
+      <li class="stat stat-paid">{{ paid }} paid</li>
+      <li class="stat stat-rejected">{{ rejected }} rejected</li>
+      <li class="stat stat-review">{% if review_count %}<a href="#queue">{{ review_count }} awaiting your review ({{ review_amount }})</a>{% else %}{{ review_count }} awaiting your review ({{ review_amount }}){% endif %}</li>
+    </ul>
+    {% endif %}
+  </div>
+  {#- Intake slot: Task 11b adds the upload drop zone and the "Process all sample invoices" button here. -#}
+  <div class="intake" id="intake"></div>
+</section>
+
+{% if missing %}
+<div class="notice notice-warn" role="alert">That invoice wasn't found. It may have been removed when the databases were reset.</div>
+{% endif %}
+
+{% if rows %}
+<div class="queue-table">
+  <table id="queue">
+    <caption class="sr-only">All processed invoices, those awaiting your review first</caption>
+    <thead>
+      <tr>
+        <th scope="col">Status</th>
+        <th scope="col">Invoice</th>
+        <th scope="col">Vendor</th>
+        <th scope="col" class="num">Amount</th>
+        <th scope="col">Why</th>
+        <th scope="col" class="updated">Updated</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr class="row-{{ r.status | lower }}">
+        <td class="c-status"><span class="pill pill-{{ r.status | lower }}">{{ r.status_label }}</span></td>
+        <td class="c-number"><a class="row-link" href="/invoices/{{ r.run_id }}">{{ r.number }}</a></td>
+        <td class="c-vendor">{{ r.vendor }}</td>
+        <td class="c-amount num">{{ r.amount }}</td>
+        <td class="c-why">{{ r.why }}</td>
+        <td class="c-updated updated"><span class="sr-only">Updated </span>{{ r.updated }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  <h2>No invoices yet</h2>
+  <p>Processed invoices show up here, with anything that needs your decision at the top.</p>
+  <p class="hint">To process the sample set, run <code>python main.py --invoice_dir=data/invoices</code>, then refresh.</p>
+</div>
+{% endif %}
+{% endblock %}
