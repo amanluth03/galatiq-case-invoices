@@ -1,9 +1,11 @@
-"""Test doubles for extraction: a scripted fake Extractor and a clean-invoice builder.
-Lets pipeline tests run the extract stage without calling the real LLM.
+"""Test doubles: scripted fake Extractor, Analyst and VP, plus invoice, recommendation and review builders.
+Lets pipeline tests run the extract and approval stages without calling the real LLM.
 """
 from typing import NamedTuple
 
-from invoice_agent.models import ExtractedField, ExtractedInvoice, ExtractedLineItem
+from invoice_agent.models import (
+    ExtractedField, ExtractedInvoice, ExtractedLineItem, Recommendation, VPReview,
+)
 
 
 class Call(NamedTuple):
@@ -68,3 +70,47 @@ def make_extracted(**overrides) -> ExtractedInvoice:
         # Shorthand: a bare string becomes a high-confidence field.
         fields[key] = _f(value) if isinstance(value, str) else value
     return ExtractedInvoice(**fields)
+
+
+class ScriptedAnalyst:
+    """Fake AnalystFn returning scripted Recommendations in order and recording (context, rounds) per call."""
+
+    def __init__(self, responses: list[Recommendation]):
+        """Store the scripted recommendations and start with no recorded calls."""
+        self.responses = list(responses)
+        self.calls: list[tuple] = []
+
+    def __call__(self, context, rounds):
+        """Record the call (copying rounds), then return the next scripted recommendation."""
+        self.calls.append((context, list(rounds)))
+        if len(self.calls) > len(self.responses):
+            raise AssertionError("ScriptedAnalyst called more times than scripted")
+        return self.responses[len(self.calls) - 1]
+
+
+class ScriptedVP:
+    """Fake VPFn returning scripted VPReviews in order and recording (context, recommendation, rounds) per call."""
+
+    def __init__(self, responses: list[VPReview]):
+        """Store the scripted reviews and start with no recorded calls."""
+        self.responses = list(responses)
+        self.calls: list[tuple] = []
+
+    def __call__(self, context, recommendation, rounds):
+        """Record the call (copying rounds), then return the next scripted review."""
+        self.calls.append((context, recommendation, list(rounds)))
+        if len(self.calls) > len(self.responses):
+            raise AssertionError("ScriptedVP called more times than scripted")
+        return self.responses[len(self.calls) - 1]
+
+
+def make_recommendation(decision="APPROVE", checklist=None, **kw) -> Recommendation:
+    """Build a Recommendation with defaults; checklist=None means none given."""
+    kw.setdefault("reasoning", "because")
+    return Recommendation(decision=decision, checklist=checklist, **kw)
+
+
+def make_review(verdict="ACCEPT", final_decision="APPROVE", feedback=None, **kw) -> VPReview:
+    """Build a VPReview; for SEND_BACK pass final_decision=None."""
+    kw.setdefault("reasoning", "vp reasoning")
+    return VPReview(verdict=verdict, final_decision=final_decision, feedback=feedback, **kw)
