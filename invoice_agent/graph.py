@@ -70,17 +70,20 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
             "extraction_issues": [*state.get("extraction_issues", []), *res.issues],
         })
 
-    def validate(state: PipelineState) -> dict:
-        """Run the rulebook and the duplicate check, merging both sets of flags."""
+    def validate(state: PipelineState) -> Command[Literal["mark_duplicate", "approval", "fail"]]:
+        """Run the rulebook and the duplicate check; an exact duplicate stops here, everything else goes to the agents."""
         inv = state["invoice"]
-        flags = run_validation(deps.conn, inv, state["raw_text"], state.get("extraction_issues", []))
-        fp = fingerprint(inv)
-        dup = find_duplicate(deps.conn, inv, fp, state["content_hash"], state["run_id"])
-        return {"flags": [*flags, *dup.flags], "fingerprint": fp, "duplicate_of": dup.duplicate_of}
-
-    def route_after_validate(state: PipelineState) -> Literal["mark_duplicate", "approval"]:
-        """An exact duplicate stops here; everything else goes to the agents."""
-        return "mark_duplicate" if state.get("duplicate_of") else "approval"
+        try:
+            flags = run_validation(deps.conn, inv, state["raw_text"], state.get("extraction_issues", []))
+            fp = fingerprint(inv)
+            dup = find_duplicate(deps.conn, inv, fp, state["content_hash"], state["run_id"])
+        except Exception as exc:
+            # A bug or DB error here must end the run as ERROR, never crash the caller.
+            return Command(goto="fail", update={"error": _error_text(exc)})
+        goto = "mark_duplicate" if dup.duplicate_of else "approval"
+        return Command(goto=goto, update={
+            "flags": [*flags, *dup.flags], "fingerprint": fp, "duplicate_of": dup.duplicate_of,
+        })
 
     def mark_duplicate(state: PipelineState) -> dict:
         """End the run as DUPLICATE, pointing at the original run."""
@@ -89,20 +92,20 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
             reasoning=f"Duplicate of run {state['duplicate_of']}: same invoice number and contents",
         )}
 
-    def approval(state: PipelineState) -> dict:
-        """Run the analyst <-> VP critique loop on this invoice and store its outcome."""
+    def approval(state: PipelineState) -> Command[Literal["guardrail", "log_rejection", "human_review", "fail"]]:
+        """Run the analyst <-> VP loop; APPROVE must still pass the guardrail, REJECT is logged, unsettled goes to a human."""
         ctx = ApprovalContext(
             invoice=state["invoice"], flags=state.get("flags", []),
             uncertainties=state.get("uncertainties", []), policy=APPROVAL_POLICY,
         )
-        out = approval_graph.invoke({"context": ctx, "rounds": [], "outcome": None})
-        return {"approval": out["outcome"]}
-
-    def route_after_approval(state: PipelineState) -> Literal["guardrail", "log_rejection", "human_review"]:
-        """APPROVE must still pass the guardrail; REJECT is logged; an unsettled loop goes to a human."""
-        return {
-            "APPROVE": "guardrail", "REJECT": "log_rejection", "NEEDS_HUMAN_REVIEW": "human_review",
-        }[state["approval"].decision]
+        try:
+            out = approval_graph.invoke({"context": ctx, "rounds": [], "outcome": None})
+        except Exception as exc:
+            # E.g. Grok timeout or malformed agent output: no decision means ERROR, not a crash.
+            return Command(goto="fail", update={"error": _error_text(exc)})
+        outcome = out["outcome"]
+        goto = {"APPROVE": "guardrail", "REJECT": "log_rejection", "NEEDS_HUMAN_REVIEW": "human_review"}[outcome.decision]
+        return Command(goto=goto, update={"approval": outcome})
 
     def guardrail(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
         """Block an agent APPROVE when any must_reject flag is set; otherwise let it through to pay."""
@@ -128,10 +131,13 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         goto = "pay" if decision.decision == "APPROVE" else "log_rejection"
         return Command(goto=goto, update={"human_decision": decision})
 
-    def pay(state: PipelineState) -> dict:
-        """Pay the vendor the invoice total and record who approved it."""
+    def pay(state: PipelineState) -> Command[Literal["__end__", "fail"]]:
+        """Pay the vendor the invoice total and record who approved it; a payment error ends the run as ERROR."""
         inv = state["invoice"]
-        result = deps.pay(inv.vendor, inv.total)
+        try:
+            result = deps.pay(inv.vendor, inv.total)
+        except Exception as exc:
+            return Command(goto="fail", update={"error": _error_text(exc)})
         human = state.get("human_decision")
         if human:
             reasoning = (human.justification or "").strip() or human.note or "Approved by human reviewer"
@@ -140,7 +146,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         else:
             final = FinalOutcome(status="PAID", decided_by="agents", reasoning=state["approval"].reasoning,
                                  payment_result=result)
-        return {"final": final}
+        return Command(goto=END, update={"final": final})
 
     def log_rejection(state: PipelineState) -> dict:
         """Record the rejection and who made it (guardrail, human or agents); the runner persists the full state."""
@@ -163,9 +169,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
     for node in (read, extract, validate, mark_duplicate, approval, guardrail, human_review, pay, log_rejection, fail):
         g.add_node(node.__name__, node)
     g.add_edge(START, "read")
-    # read, extract, guardrail and human_review route themselves with Command(goto=...).
-    g.add_conditional_edges("validate", route_after_validate)
-    g.add_conditional_edges("approval", route_after_approval)
-    for terminal in ("mark_duplicate", "pay", "log_rejection", "fail"):
+    # Every other node routes itself with Command(goto=...), so any stage can divert to fail.
+    for terminal in ("mark_duplicate", "log_rejection", "fail"):
         g.add_edge(terminal, END)
     return g.compile(checkpointer=checkpointer)

@@ -214,3 +214,50 @@ def test_read_failure_ends_in_error(conn, tmp_path):
     assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
     assert "unsupported file extension" in out["final"].reasoning
     assert len(ex.calls) == 0 and len(pay.calls) == 0
+
+
+def test_analyst_failure_ends_in_error(conn):
+    """An analyst that raises (e.g. the Grok API is down) ends the run as ERROR instead of crashing; nothing is paid."""
+    ex = ScriptedExtractor([make_extracted()])
+    a, v = ScriptedAnalyst([RuntimeError("grok unavailable")]), ScriptedVP([])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, _ = run(graph, "invoice_1001.txt")
+    assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
+    assert "grok unavailable" in out["final"].reasoning
+    assert len(a.calls) == 1 and len(v.calls) == 0 and len(pay.calls) == 0
+
+
+def test_payment_failure_ends_in_error(conn):
+    """A payment call that raises ends the run as ERROR (not PAID), with the payment error as the reason."""
+    ex = ScriptedExtractor([make_extracted()])
+    a, v = ScriptedAnalyst([make_recommendation()]), ScriptedVP([make_review()])
+    calls = []
+
+    def failing_pay(vendor, amount):
+        """Record the attempt, then fail like a payment gateway outage."""
+        calls.append((vendor, amount))
+        raise ConnectionError("payment gateway down")
+
+    graph = build_graph(Deps(extractor=ex, analyst=a, vp=v, pay=failing_pay, conn=conn), InMemorySaver())
+    out, _ = run(graph, "invoice_1001.txt")
+    assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
+    assert "payment gateway down" in out["final"].reasoning
+    assert len(calls) == 1
+
+
+def test_validation_failure_ends_in_error(conn, monkeypatch):
+    """An unexpected crash inside validation ends the run as ERROR before the agents are called."""
+    import invoice_agent.graph as graph_module
+
+    def boom(*args, **kwargs):
+        """Stand-in for a validation bug."""
+        raise KeyError("items")
+
+    monkeypatch.setattr(graph_module, "run_validation", boom)
+    ex = ScriptedExtractor([make_extracted()])
+    a, v = ScriptedAnalyst([]), ScriptedVP([])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, _ = run(graph, "invoice_1001.txt")
+    assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
+    assert "items" in out["final"].reasoning
+    assert len(a.calls) == 0 and len(pay.calls) == 0

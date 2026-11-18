@@ -77,19 +77,22 @@ def make_extracted(**overrides) -> ExtractedInvoice:
 
 
 class ScriptedAnalyst:
-    """Fake AnalystFn returning scripted Recommendations in order and recording (context, rounds) per call."""
+    """Fake AnalystFn returning (or raising) scripted Recommendations in order and recording (context, rounds) per call."""
 
-    def __init__(self, responses: list[Recommendation]):
+    def __init__(self, responses: list[Recommendation | Exception]):
         """Store the scripted recommendations and start with no recorded calls."""
         self.responses = list(responses)
         self.calls: list[tuple] = []
 
     def __call__(self, context, rounds):
-        """Record the call (copying rounds), then return the next scripted recommendation."""
+        """Record the call (copying rounds), then return the next scripted recommendation or raise it if it is an exception."""
         self.calls.append((context, list(rounds)))
         if len(self.calls) > len(self.responses):
             raise AssertionError("ScriptedAnalyst called more times than scripted")
-        return self.responses[len(self.calls) - 1]
+        response = self.responses[len(self.calls) - 1]
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class ScriptedVP:
