@@ -3,9 +3,9 @@ Sits in the validate stage (read -> extract -> validate -> approval ...); checks
 """
 import re
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
-from invoice_agent.utils.arithmetic import lines_plus_charges, reconcile
+from invoice_agent.utils.arithmetic import line_overcharges, lines_plus_charges, reconcile
 from invoice_agent.infra.config import SCRUTINY_THRESHOLD
 from invoice_agent.infra.db import get_inventory
 from invoice_agent.models import Flag, Invoice
@@ -129,9 +129,23 @@ def check_arithmetic(inv: Invoice) -> list[Flag]:
         for m in reconcile(inv)
     ]
     # Overbilling: we would pay more than the goods + tax + shipping are worth (sample 1013, $50 over).
-    # Compared against the lines, not the stated subtotal, so an inflated subtotal cannot hide it.
+    # Lines are priced as qty x unit_price (not the vendor's line_total) and compared against the lines,
+    # not the stated subtotal, so neither an inflated line_total nor an inflated subtotal can hide it.
     # Under-billing (sample 1007) stays an arithmetic_mismatch for the agents to explain.
-    expected = lines_plus_charges(inv)
+    try:
+        expected = lines_plus_charges(inv)
+        overcharged = line_overcharges(inv)
+    except InvalidOperation:
+        # Fail closed: a total we cannot check against its lines must not be paid.
+        if inv.total is not None:
+            flags.append(Flag(severity="must_reject", code="total_unverifiable", field_path="total",
+                              message="line amounts are too large to compute, so the total cannot be verified"))
+        return flags
+    for i, stated, computed in overcharged:
+        flags.append(Flag(
+            severity="must_reject", code="line_total_exceeds_price", field_path=f"items[{i}].line_total",
+            message=f"items[{i}]: line_total {stated} is more than qty x unit_price = {computed}",
+        ))
     if inv.total is not None and expected is not None and inv.total > expected:
         flags.append(Flag(
             severity="must_reject", code="total_exceeds_line_items", field_path="total",

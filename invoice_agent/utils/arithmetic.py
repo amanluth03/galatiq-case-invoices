@@ -23,18 +23,34 @@ def _line_amount(it) -> Decimal | None:
     return None
 
 
+def _priced_amount(it) -> Decimal | None:
+    """A line's amount for the overbilling gate: qty x unit_price when both are known, else the stated line_total."""
+    # The vendor writes line_total, so it is only trusted when there is nothing to recompute it from.
+    if it.qty is not None and it.unit_price is not None:
+        return _q(it.qty * it.unit_price)
+    return _q(it.line_total) if it.line_total is not None else None
+
+
 def lines_plus_charges(inv: Invoice) -> Decimal | None:
-    """Sum of line amounts + tax + shipping (the same amounts reconcile uses); None when no line has an amount."""
-    try:
-        amounts = [a for a in (_line_amount(it) for it in inv.items) if a is not None]
-        if not amounts:
-            return None
-        tax = _q(inv.tax) if inv.tax is not None else Decimal("0.00")
-        ship = _q(inv.shipping) if inv.shipping is not None else Decimal("0.00")
-        return sum(amounts, Decimal("0.00")) + tax + ship
-    # Absurd magnitudes are already reported by reconcile; nothing to compare here.
-    except InvalidOperation:
+    """Sum of priced line amounts + tax + shipping; None when no line has an amount.
+    Raises InvalidOperation when the amounts are too large to compute, so callers can fail closed."""
+    amounts = [a for a in (_priced_amount(it) for it in inv.items) if a is not None]
+    if not amounts:
         return None
+    tax = _q(inv.tax) if inv.tax is not None else Decimal("0.00")
+    ship = _q(inv.shipping) if inv.shipping is not None else Decimal("0.00")
+    return sum(amounts, Decimal("0.00")) + tax + ship
+
+
+def line_overcharges(inv: Invoice) -> list[tuple[int, Decimal, Decimal]]:
+    """(index, stated line_total, qty x unit_price) for each line billed above its own price; raises InvalidOperation like above."""
+    out = []
+    for i, it in enumerate(inv.items):
+        if it.qty is not None and it.unit_price is not None and it.line_total is not None:
+            computed = _q(it.qty * it.unit_price)
+            if _q(it.line_total) > computed:
+                out.append((i, _q(it.line_total), computed))
+    return out
 
 
 def reconcile(inv: Invoice) -> list[str]:

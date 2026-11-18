@@ -35,7 +35,7 @@ def test_checklist_complete_requires_all_keys():
 def test_policy_mentions_every_flag_code_and_checklist_key():
     """The policy text the agents read covers every rulebook code and checklist key."""
     codes = """exceeds_stock unknown_item zero_stock_item non_positive_quantity negative_total missing_vendor
-    missing_total missing_quantity no_line_items invoice_number_reused total_exceeds_line_items price_mismatch arithmetic_mismatch over_10k
+    missing_total missing_quantity no_line_items invoice_number_reused total_exceeds_line_items line_total_exceeds_price total_unverifiable price_mismatch arithmetic_mismatch over_10k
     due_date_missing due_before_or_on_invoice_date non_usd_currency missing_unit_price extraction_issue
     urgency_language vendor_name_change""".split()
     for code in codes + list(CHECKLIST_KEYS):

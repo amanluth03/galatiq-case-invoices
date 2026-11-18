@@ -280,3 +280,41 @@ def test_overbilling_uses_line_amounts_not_stated_subtotal(conn):
 def test_clean_total_has_no_overbilling_flag(conn):
     """1001 reconciles exactly, so no total_exceeds_line_items flag."""
     assert "total_exceeds_line_items" not in codes(run_validation(conn, inv_1001(), "", []))
+
+
+def test_inflated_line_total_is_must_reject_and_caught_by_total_gate(conn):
+    """A vendor inflating a line_total (10 x 250 billed as 2600) cannot slip past: both gates reject."""
+    items = [L("WidgetA", 10, "250.00"), L("WidgetB", 5, "500.00")]
+    items[0] = items[0].model_copy(update={"line_total": D("2600.00")})
+    flags = run_validation(conn, inv_1001(items=items, subtotal=D("5100.00"), total=D("5100.00")), "", [])
+    line = [f for f in flags if f.code == "line_total_exceeds_price"]
+    assert len(line) == 1 and line[0].severity == "must_reject" and line[0].field_path == "items[0].line_total"
+    assert "2600.00" in line[0].message and "2500.00" in line[0].message
+    # The total gate uses qty x unit_price, so the inflated line does not raise the expected total.
+    assert "total_exceeds_line_items" in codes(flags, "must_reject")
+
+
+def test_line_total_below_price_is_not_line_overcharge(conn):
+    """A line_total under qty x unit_price is not overbilling: only the existing arithmetic scrutiny applies."""
+    items = [L("WidgetA", 10, "250.00"), L("WidgetB", 5, "500.00")]
+    items[0] = items[0].model_copy(update={"line_total": D("2400.00")})
+    flags = run_validation(conn, inv_1001(items=items), "", [])
+    assert "line_total_exceeds_price" not in codes(flags)
+    assert "arithmetic_mismatch" in codes(flags, "needs_scrutiny")
+
+
+def test_line_total_used_when_price_missing(conn):
+    """With no unit price, the stated line_total is the only amount, so the total gate falls back to it."""
+    items = [L("WidgetA", 10, "250.00"), L("WidgetB", 5, "500.00")]
+    items[1] = items[1].model_copy(update={"unit_price": None, "line_total": D("2500.00")})
+    assert "total_exceeds_line_items" not in codes(run_validation(conn, inv_1001(items=items), "", []))
+    flags = run_validation(conn, inv_1001(items=items, subtotal=D("5001.00"), total=D("5001.00")), "", [])
+    assert "total_exceeds_line_items" in codes(flags, "must_reject")
+
+
+def test_uncomputable_amounts_fail_closed(conn):
+    """If the line amounts overflow the arithmetic but a total is stated, the invoice is must_reject total_unverifiable."""
+    items = [L("WidgetA", "1E+30", "250.00")]
+    flags = run_validation(conn, inv_1001(items=items, subtotal=None), "", [])
+    unverifiable = [f for f in flags if f.code == "total_unverifiable"]
+    assert len(unverifiable) == 1 and unverifiable[0].severity == "must_reject"
