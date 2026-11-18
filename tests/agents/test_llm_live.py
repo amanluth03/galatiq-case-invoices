@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from invoice_agent.agents.extractor.agent import make_extractor, run_extraction
+from invoice_agent.agents.ingestion.agent import make_ingestion_agent, run_extraction
 from invoice_agent.agents.llm import make_model
 from invoice_agent.infra.config import load_settings
 from invoice_agent.infra.db import SEED_INVENTORY
@@ -23,7 +23,7 @@ def test_grok_extracts_1002():
     if not settings.xai_api_key:
         pytest.skip("XAI_API_KEY not set")
     raw = read_file(ROOT / "data" / "invoices" / "invoice_1002.txt").raw_text
-    res = run_extraction(raw, make_extractor(make_model(settings)), [sku for sku, _, _ in SEED_INVENTORY])
+    res = run_extraction(raw, make_ingestion_agent(make_model(settings)), [sku for sku, _, _ in SEED_INVENTORY])
     assert res.invoice.invoice_number == "INV-1002"
     gadget = [it for it in res.invoice.items if it.sku == "GadgetX"]
     assert len(gadget) == 1 and gadget[0].qty == Decimal("20")

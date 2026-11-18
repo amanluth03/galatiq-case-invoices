@@ -1,7 +1,7 @@
-"""The instructions given to the Grok extractor; kept apart from agent.py so prompt edits never touch logic.
+"""The instructions given to the Grok ingestion agent; kept apart from agent.py so prompt edits never touch logic.
 Used by the extract stage (read -> extract -> validate ...)."""
 
-EXTRACTION_PROMPT = """You extract structured data from an invoice's raw text.
+INGESTION_PROMPT = """You extract structured data from an invoice's raw text.
 
 Map whatever labels the document uses onto the schema fields, e.g.
 "Vndr" / "FROM" -> vendor, "Inv #" / "INV NO" -> invoice_number, "Itms" / "Description" -> items.

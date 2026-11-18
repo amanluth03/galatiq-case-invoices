@@ -1,4 +1,4 @@
-"""Builds the xAI Grok chat model that every agent (extractor, analyst, VP) runs on."""
+"""Builds the xAI Grok chat model that every agent (ingestion agent, analyst, VP) runs on."""
 from langchain_xai import ChatXAI
 
 from invoice_agent.infra.config import Settings

@@ -1,4 +1,4 @@
-"""Test doubles: scripted fake Extractor, Analyst, VP and chat model, plus invoice, recommendation and review builders.
+"""Test doubles: scripted fake IngestionAgent, Analyst, VP and chat model, plus invoice, recommendation and review builders.
 Lets pipeline tests run the extract and approval stages without calling the real LLM.
 """
 from typing import NamedTuple
@@ -13,13 +13,13 @@ from invoice_agent.models import (
 
 
 class Call(NamedTuple):
-    """One recorded extractor call: the text it was given and the errors fed back."""
+    """One recorded ingestion agent call: the text it was given and the errors fed back."""
     raw_text: str
     errors: list[str]
 
 
-class ScriptedExtractor:
-    """Fake Extractor that returns (or raises) scripted responses in order and records each call."""
+class ScriptedIngestionAgent:
+    """Fake IngestionAgent that returns (or raises) scripted responses in order and records each call."""
 
     def __init__(self, responses: list[ExtractedInvoice | Exception]):
         """Store the scripted responses and start with no recorded calls."""
@@ -31,7 +31,7 @@ class ScriptedExtractor:
         self.calls.append(Call(raw_text, list(errors)))
         # Fail loudly if the code under test calls more often than the test planned for.
         if len(self.calls) > len(self.responses):
-            raise AssertionError("ScriptedExtractor called more times than scripted")
+            raise AssertionError("ScriptedIngestionAgent called more times than scripted")
         response = self.responses[len(self.calls) - 1]
         if isinstance(response, Exception):
             raise response

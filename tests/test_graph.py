@@ -15,7 +15,7 @@ from invoice_agent.models import ExtractedField, ExtractedLineItem
 from invoice_agent.utils.normalize import to_invoice
 from invoice_agent.utils.validation.validate import fingerprint
 from tests.fakes import (
-    ScriptedAnalyst, ScriptedExtractor, ScriptedVP, make_extracted, make_recommendation, make_review,
+    ScriptedAnalyst, ScriptedIngestionAgent, ScriptedVP, make_extracted, make_recommendation, make_review,
 )
 
 INVOICES = Path(__file__).parent.parent / "data" / "invoices"
@@ -58,10 +58,10 @@ def conn(tmp_path):
     c.close()
 
 
-def make_graph(conn, extractor, analyst, vp):
+def make_graph(conn, ingestion, analyst, vp):
     """Build the pipeline with fakes and an in-memory checkpointer; returns (graph, pay fake)."""
     pay = RecordingPay()
-    deps = Deps(extractor=extractor, analyst=analyst, vp=vp, pay=pay, conn=conn)
+    deps = Deps(ingestion=ingestion, analyst=analyst, vp=vp, pay=pay, conn=conn)
     return build_graph(deps, InMemorySaver(serde=make_serializer())), pay
 
 
@@ -79,7 +79,7 @@ def send_backs(n=3):
 
 def test_clean_invoice_is_paid(conn):
     """1001 with approving agents is paid exactly once, to the right vendor and amount."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([make_recommendation()]), ScriptedVP([make_review()])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -91,7 +91,7 @@ def test_clean_invoice_is_paid(conn):
 
 def test_guardrail_blocks_agent_approval_over_must_reject(conn):
     """1002 (20 GadgetX, 5 in stock): agents approve, but the guardrail forces REJECT and nothing is paid."""
-    ex = ScriptedExtractor([extracted_1002()])
+    ex = ScriptedIngestionAgent([extracted_1002()])
     a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)])
     v = ScriptedVP([make_review()])
     graph, pay = make_graph(conn, ex, a, v)
@@ -107,7 +107,7 @@ def test_guardrail_blocks_agent_approval_over_must_reject(conn):
 
 def test_agent_reject_logs_reasoning(conn):
     """An accepted agent REJECT ends REJECTED by the agents, carrying the VP's reasoning; nothing is paid."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a = ScriptedAnalyst([make_recommendation("REJECT")])
     v = ScriptedVP([make_review(final_decision="REJECT", reasoning="price unexplained")])
     graph, pay = make_graph(conn, ex, a, v)
@@ -121,7 +121,7 @@ def test_agent_reject_logs_reasoning(conn):
 
 def test_needs_human_review_pauses(conn):
     """Three VP send-backs pause the graph at human_review with the run id; nothing is paid yet."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -135,7 +135,7 @@ def test_needs_human_review_pauses(conn):
 
 def test_human_approve_resumes_to_pay(conn):
     """Resuming a paused run with a human APPROVE pays it, recorded as the human's decision."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
     _, config = run(graph, "invoice_1001.txt")
@@ -143,13 +143,13 @@ def test_human_approve_resumes_to_pay(conn):
     assert out["final"].status == "PAID" and out["final"].decided_by == "human"
     assert out["final"].human_note == "ok"
     assert pay.calls == [("Widgets Inc.", Decimal("5000.00"))]
-    # Resuming re-runs only human_review onward: no extra extractor or agent calls.
+    # Resuming re-runs only human_review onward: no extra ingestion agent or agent calls.
     assert len(ex.calls) == 1 and len(a.calls) == 3 and len(v.calls) == 3
 
 
 def test_human_reject_logs_rejection(conn):
     """A human REJECT on resume ends REJECTED by the human, with their note, and nothing is paid."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
     _, config = run(graph, "invoice_1001.txt")
@@ -161,7 +161,7 @@ def test_human_reject_logs_rejection(conn):
 
 def test_human_approve_over_must_reject_requires_justification(conn):
     """Approving 1002 over its must_reject flag fails without a justification, then succeeds with one."""
-    ex = ScriptedExtractor([extracted_1002()])
+    ex = ScriptedIngestionAgent([extracted_1002()])
     a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)] * 3)
     v = ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
@@ -183,7 +183,7 @@ def test_duplicate_short_circuits(conn):
     """An invoice already processed with identical contents ends DUPLICATE without calling the agents."""
     inv, _ = to_invoice(make_extracted(), db.all_skus(conn))
     db.save_run(conn, {"run_id": "prior", "content_hash": "other-file", "invoice": inv, "fingerprint": fingerprint(inv)})
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -192,9 +192,9 @@ def test_duplicate_short_circuits(conn):
     assert len(ex.calls) == 1 and len(a.calls) == 0 and len(v.calls) == 0 and len(pay.calls) == 0
 
 
-def test_extractor_failure_ends_in_error(conn):
-    """An extractor that fails on every attempt ends the run as ERROR (decided by the system) with the reason."""
-    ex = ScriptedExtractor([RuntimeError("model timeout")] * 3)
+def test_ingestion_agent_failure_ends_in_error(conn):
+    """An ingestion agent that fails on every attempt ends the run as ERROR (decided by the system) with the reason."""
+    ex = ScriptedIngestionAgent([RuntimeError("model timeout")] * 3)
     a, v = ScriptedAnalyst([]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -204,10 +204,10 @@ def test_extractor_failure_ends_in_error(conn):
 
 
 def test_read_failure_ends_in_error(conn, tmp_path):
-    """A file the reader cannot handle ends the run as ERROR before the extractor is ever called."""
+    """A file the reader cannot handle ends the run as ERROR before the ingestion agent is ever called."""
     bad = tmp_path / "invoice.docx"
     bad.write_text("not supported")
-    ex = ScriptedExtractor([])
+    ex = ScriptedIngestionAgent([])
     graph, pay = make_graph(conn, ex, ScriptedAnalyst([]), ScriptedVP([]))
     config = {"configurable": {"thread_id": "run-bad"}}
     out = graph.invoke({"run_id": "run-bad", "source_path": str(bad)}, config)
@@ -218,7 +218,7 @@ def test_read_failure_ends_in_error(conn, tmp_path):
 
 def test_analyst_failure_ends_in_error(conn):
     """An analyst that raises (e.g. the Grok API is down) ends the run as ERROR instead of crashing; nothing is paid."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([RuntimeError("grok unavailable")]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -229,7 +229,7 @@ def test_analyst_failure_ends_in_error(conn):
 
 def test_payment_failure_ends_in_error(conn):
     """A payment call that raises ends the run as ERROR (not PAID), with the payment error as the reason."""
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([make_recommendation()]), ScriptedVP([make_review()])
     calls = []
 
@@ -238,7 +238,7 @@ def test_payment_failure_ends_in_error(conn):
         calls.append((vendor, amount))
         raise ConnectionError("payment gateway down")
 
-    graph = build_graph(Deps(extractor=ex, analyst=a, vp=v, pay=failing_pay, conn=conn), InMemorySaver())
+    graph = build_graph(Deps(ingestion=ex, analyst=a, vp=v, pay=failing_pay, conn=conn), InMemorySaver())
     out, _ = run(graph, "invoice_1001.txt")
     assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
     assert "payment gateway down" in out["final"].reasoning
@@ -254,7 +254,7 @@ def test_validation_failure_ends_in_error(conn, monkeypatch):
         raise KeyError("items")
 
     monkeypatch.setattr(graph_module, "run_validation", boom)
-    ex = ScriptedExtractor([make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted()])
     a, v = ScriptedAnalyst([]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1001.txt")
@@ -265,7 +265,7 @@ def test_validation_failure_ends_in_error(conn, monkeypatch):
 
 def test_reused_thread_does_not_carry_over_previous_outcome(conn):
     """Re-running on the same thread_id starts clean: a paid first run cannot leak PAID into a rejected second run."""
-    ex = ScriptedExtractor([make_extracted(), make_extracted()])
+    ex = ScriptedIngestionAgent([make_extracted(), make_extracted()])
     a = ScriptedAnalyst([make_recommendation(), make_recommendation("REJECT")])
     v = ScriptedVP([make_review(), make_review(final_decision="REJECT", reasoning="nope")])
     graph, pay = make_graph(conn, ex, a, v)
@@ -280,7 +280,7 @@ def test_reused_thread_does_not_carry_over_previous_outcome(conn):
 
 def test_reused_thread_after_guardrail_block_uses_new_decision(conn):
     """A guardrail block in run 1 must not be replayed as the rejection reason of a later agent REJECT on the same thread."""
-    ex = ScriptedExtractor([extracted_1002(), extracted_1002()])
+    ex = ScriptedIngestionAgent([extracted_1002(), extracted_1002()])
     a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST), make_recommendation("REJECT", checklist=FULL_CHECKLIST)])
     v = ScriptedVP([make_review(), make_review(final_decision="REJECT", reasoning="stock short")])
     graph, pay = make_graph(conn, ex, a, v)
@@ -294,7 +294,7 @@ def test_reused_thread_after_guardrail_block_uses_new_decision(conn):
 @pytest.mark.parametrize("field", ["vendor", "total"])
 def test_pay_refuses_missing_vendor_or_total(conn, field):
     """Even a justified human APPROVE cannot pay an invoice with no vendor or total: ERROR, and pay is never called."""
-    ex = ScriptedExtractor([make_extracted(**{field: ExtractedField(value=None, raw=None, confidence="low")})])
+    ex = ScriptedIngestionAgent([make_extracted(**{field: ExtractedField(value=None, raw=None, confidence="low")})])
     a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
     first, config = run(graph, "invoice_1001.txt")
@@ -319,10 +319,10 @@ def test_sqlite_checkpoint_round_trip_has_no_unregistered_types(conn, tmp_path):
     unregister = register_serde_event_listener(events.append)
     cp = sqlite3.connect(tmp_path / "checkpoints.db", check_same_thread=False)
     try:
-        ex = ScriptedExtractor([extracted_1002()])
+        ex = ScriptedIngestionAgent([extracted_1002()])
         a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)] * 3)
         pay = RecordingPay()
-        deps = Deps(extractor=ex, analyst=a, vp=ScriptedVP(send_backs()), pay=pay, conn=conn)
+        deps = Deps(ingestion=ex, analyst=a, vp=ScriptedVP(send_backs()), pay=pay, conn=conn)
         graph = build_graph(deps, SqliteSaver(cp, serde=make_serializer()))
         _, config = run(graph, "invoice_1002.txt")
         out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "ok", "justification": "agreed"}), config)
@@ -346,7 +346,7 @@ def extracted_price_mismatch():
 
 def test_agent_approval_over_price_mismatch_goes_to_human(conn):
     """Agents approve an off-price invoice: the guardrail pauses it for a person instead of paying."""
-    ex = ScriptedExtractor([extracted_price_mismatch()])
+    ex = ScriptedIngestionAgent([extracted_price_mismatch()])
     a, v = ScriptedAnalyst([make_recommendation()]), ScriptedVP([make_review()])
     graph, pay = make_graph(conn, ex, a, v)
     out, config = run(graph, "invoice_1001.txt")
@@ -367,7 +367,7 @@ def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path
     # The urgency flag comes from the raw text, so the file says it; the scripted extraction supplies the fields.
     source = tmp_path / "urgent.txt"
     source.write_text("Widgets Inc. invoice — URGENT, please pay immediately")
-    ex = ScriptedExtractor([make_extracted(
+    ex = ScriptedIngestionAgent([make_extracted(
         subtotal="12500.00", total="12500.00",
         items=[ExtractedLineItem(name=_f("WidgetA"), qty=_f("15"), unit_price=_f("250.00"), line_total=_f("3750.00")),
                ExtractedLineItem(name=_f("WidgetB"), qty=_f("10"), unit_price=_f("500.00"), line_total=_f("5000.00")),

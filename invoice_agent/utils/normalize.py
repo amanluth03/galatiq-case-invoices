@@ -107,7 +107,7 @@ def to_invoice(ext: ExtractedInvoice, skus: list[str]) -> tuple[Invoice, list[Un
         elif f.confidence != "high":
             unc.append(Uncertainty(field_path=path, raw=f.raw, normalized=norm,
                                    confidence=f.confidence,
-                                   reason=f"extractor confidence {f.confidence}"))
+                                   reason=f"ingestion agent confidence {f.confidence}"))
 
     def conv(path: str, f: ExtractedField | None, fn):
         """Convert a field with fn and note any uncertainty; absent/blank gives None."""

@@ -1,5 +1,5 @@
 """The top-level pipeline graph: read -> extract -> validate -> approval -> guardrail -> pay / log_rejection / human_review.
-Code decides every step; the LLM roles (extractor, analyst, VP) and payment are injected through Deps so tests can use fakes.
+Code decides every step; the LLM roles (ingestion agent, analyst, VP) and payment are injected through Deps so tests can use fakes.
 """
 import inspect
 import sqlite3
@@ -18,7 +18,7 @@ from invoice_agent import models
 
 from invoice_agent.agents.approval.loop import AnalystFn, ApprovalContext, VPFn, build_approval_graph
 from invoice_agent.agents.approval.policy import APPROVAL_POLICY
-from invoice_agent.agents.extractor.agent import Extractor, run_extraction
+from invoice_agent.agents.ingestion.agent import IngestionAgent, run_extraction
 from invoice_agent.infra.db import all_skus
 from invoice_agent.models import FinalOutcome, HumanDecision, JustifiedHumanDecision, PipelineState
 from invoice_agent.utils.guardrail import apply_guardrail, needs_human_confirmation
@@ -29,7 +29,7 @@ from invoice_agent.utils.validation.validate import find_duplicate, fingerprint,
 @dataclass
 class Deps:
     """Everything the graph calls out to: the three LLM roles, the payment function and the app database."""
-    extractor: Extractor
+    ingestion: IngestionAgent
     analyst: AnalystFn
     vp: VPFn
     pay: Callable[[str, Decimal], dict]
@@ -80,9 +80,9 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         })
 
     def extract(state: PipelineState) -> Command[Literal["validate", "fail"]]:
-        """Ask the extractor for a typed invoice (with self-correction); a total failure goes to fail."""
+        """Ask the ingestion agent for a typed invoice (with self-correction); a total failure goes to fail."""
         try:
-            res = run_extraction(state["raw_text"], deps.extractor, all_skus(deps.conn))
+            res = run_extraction(state["raw_text"], deps.ingestion, all_skus(deps.conn))
         except Exception as exc:
             # Covers ExtractionFailed, a missing API key, network errors: no invoice means nothing to validate.
             return Command(goto="fail", update={"error": _error_text(exc)})
