@@ -11,9 +11,9 @@ from rich.table import Table
 from rich.text import Text
 
 from invoice_agent.agents.llm import MissingApiKey
-from invoice_agent.infra import db
-from invoice_agent.infra.config import load_settings
-from invoice_agent.infra.logging_setup import setup_logging
+from invoice_agent.database import db
+from invoice_agent.database.config import load_settings
+from invoice_agent.database.logging_setup import setup_logging
 from invoice_agent.models import PipelineState
 from invoice_agent.runner import build_runtime, close_runtime, process_dir, process_file
 
