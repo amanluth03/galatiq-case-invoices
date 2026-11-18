@@ -44,6 +44,13 @@ def test_invoice_number(s):
     assert normalize_invoice_number(s) == "INV-1002"
 
 
+def test_invoice_number_drops_leading_zeros():
+    """Zero-padded variants match the plain number; an all-zero number keeps one zero."""
+    assert normalize_invoice_number("INV-01002") == "INV-1002"
+    assert normalize_invoice_number("0001002") == "INV-1002"
+    assert normalize_invoice_number("000") == "INV-0"
+
+
 def test_invoice_number_edge():
     """Digit-free kept as-is; blank or None gives None."""
     assert normalize_invoice_number("ABC") == "ABC"

@@ -184,11 +184,47 @@ def test_find_duplicate_reused_number(conn):
 
 
 def test_find_duplicate_ignores_reprocessed_same_file(conn):
-    """A prior run with the same content hash (same file again) is neither duplicate nor reuse."""
+    """Re-processing the same file (same run_id) is neither a duplicate nor a reuse."""
     inv = _inv_1011()
-    _save(conn, "prior", inv, "same-hash")
-    res = find_duplicate(conn, inv, fingerprint(inv), "same-hash", "new")
+    _save(conn, "r1", inv, "same-hash")
+    res = find_duplicate(conn, inv, fingerprint(inv), "same-hash", "r1")
     assert res.duplicate_of is None and res.flags == []
+
+
+def test_find_duplicate_same_hash_other_run_is_duplicate(conn):
+    """A prior run with the same content hash but a different run_id is a duplicate, not ignored."""
+    inv = _inv_1011()
+    _save(conn, "r1", inv, "h")
+    res = find_duplicate(conn, inv, fingerprint(inv), "h", "r2")
+    assert res.duplicate_of == "r1"
+
+
+def test_missing_quantity_rejects(conn):
+    """A known item with no quantity is must_reject missing_quantity."""
+    inv = inv_1001()
+    inv.items[0].qty = None
+    f = [f for f in run_validation(conn, inv, "", []) if f.code == "missing_quantity"]
+    assert [(x.severity, x.field_path) for x in f] == [("must_reject", "items[0].qty")]
+
+
+def test_missing_unit_price_needs_scrutiny(conn):
+    """A known item with no unit price is needs_scrutiny missing_unit_price."""
+    inv = inv_1001()
+    inv.items[1].unit_price = None
+    f = [f for f in run_validation(conn, inv, "", []) if f.code == "missing_unit_price"]
+    assert [(x.severity, x.field_path) for x in f] == [("needs_scrutiny", "items[1].unit_price")]
+
+
+def test_no_line_items_rejects(conn):
+    """An invoice with zero lines is must_reject no_line_items."""
+    f = [f for f in run_validation(conn, inv_1001(items=[]), "", []) if f.code == "no_line_items"]
+    assert [(x.severity, x.field_path) for x in f] == [("must_reject", "items")]
+
+
+def test_sku_missing_from_inventory_rejects(conn):
+    """A SKU set on the line but absent from inventory fails safe as unknown_item."""
+    inv = inv_1001(items=[L("Ghost", 1, "10")])
+    assert "unknown_item" in codes(run_validation(conn, inv, "", []), "must_reject")
 
 
 def test_find_duplicate_without_invoice_number(conn):

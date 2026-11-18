@@ -43,8 +43,8 @@ def find_duplicate(conn: sqlite3.Connection, inv: Invoice, fp: str, content_hash
     if inv.invoice_number is None:
         return DuplicateCheck(duplicate_of=None, flags=[])
     priors = find_runs_by_invoice_number(conn, inv.invoice_number, exclude_run_id=run_id)
-    # Same file re-processed replaces its own result, so it is not a duplicate of itself.
-    priors = [p for p in priors if p["content_hash"] != content_hash]
+    # Re-processing the same file reuses run_id, so exclude_run_id already skips it; a same-hash prior
+    # under another run_id is a real duplicate and must not be dropped.
     if not priors:
         return DuplicateCheck(duplicate_of=None, flags=[])
     same = [p for p in priors if p["fingerprint"] == fp]

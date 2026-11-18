@@ -53,7 +53,8 @@ def normalize_invoice_number(s: str | None) -> str | None:
     if s is None or not s.strip():
         return None
     digits = re.sub(r"\D", "", s)
-    return "INV-" + digits if digits else s.strip()
+    # Drop leading zeros so "INV-01002" cannot dodge duplicate lookup for "INV-1002"; all-zero stays "0".
+    return "INV-" + (digits.lstrip("0") or "0") if digits else s.strip()
 
 
 def _sku_key(name: str) -> str:

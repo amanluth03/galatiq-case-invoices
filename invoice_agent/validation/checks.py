@@ -29,7 +29,16 @@ def check_required(inv: Invoice) -> list[Flag]:
 def check_quantities(inv: Invoice) -> list[Flag]:
     """Reject zero/negative quantities and negative totals (sample 1009)."""
     flags = []
+    # Fail closed: an invoice with no lines has nothing to verify against stock or prices.
+    if not inv.items:
+        flags.append(Flag(severity="must_reject", code="no_line_items", message="Invoice has no line items", field_path="items"))
     for i, it in enumerate(inv.items):
+        # A known item with no quantity would silently skip the stock check.
+        if it.sku is not None and it.qty is None:
+            flags.append(Flag(
+                severity="must_reject", code="missing_quantity",
+                message=f"{it.name_raw}: quantity is missing", field_path=f"items[{i}].qty",
+            ))
         if it.qty is not None and it.qty <= 0:
             flags.append(Flag(
                 severity="must_reject", code="non_positive_quantity",
@@ -54,7 +63,11 @@ def check_items(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
             flags.append(Flag(severity="must_reject", code="unknown_item", message=msg, field_path=f"items[{i}]"))
             continue
         inv_row = get_inventory(conn, it.sku)
-        if inv_row is not None and inv_row["stock"] == 0:
+        # Fail-safe: a SKU that vanished from inventory is treated as unknown, never waved through.
+        if inv_row is None:
+            flags.append(Flag(severity="must_reject", code="unknown_item",
+                              message=f"{it.name_raw}: SKU {it.sku} not found in inventory", field_path=f"items[{i}]"))
+        elif inv_row["stock"] == 0:
             flags.append(Flag(
                 severity="must_reject", code="zero_stock_item",
                 message=f"{it.sku}: zero stock, suspicious item", field_path=f"items[{i}]",
@@ -89,7 +102,14 @@ def check_prices(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
     """Scrutinize any unit price that differs from the reference price (no tolerance; 1010 rush, 1013 discounts)."""
     flags = []
     for i, it in enumerate(inv.items):
-        if it.sku is None or it.unit_price is None:
+        if it.sku is None:
+            continue
+        # A known item with no price would silently skip the price check.
+        if it.unit_price is None:
+            flags.append(Flag(
+                severity="needs_scrutiny", code="missing_unit_price",
+                message=f"{it.name_raw}: unit price is missing", field_path=f"items[{i}].unit_price",
+            ))
             continue
         inv_row = get_inventory(conn, it.sku)
         if inv_row is not None and it.unit_price != inv_row["unit_price"]:
