@@ -64,7 +64,9 @@ def run_extraction(
         if not errors:
             break
     if last is None:
-        raise ExtractionFailed(f"ingestion agent produced no usable result after {attempts} attempts: {errors}")
+        # A plain sentence (not a Python list): the story shows this text to the reviewer as the reason.
+        raise ExtractionFailed(f"The ingestion agent couldn't read this invoice after {attempts} attempts. "
+                               f"Last problem: {'; '.join(errors) or 'no answer'}.")
     invoice, uncertainties, issues = last
     return ExtractionResult(invoice=invoice, uncertainties=uncertainties, issues=issues, attempts=attempts)
 

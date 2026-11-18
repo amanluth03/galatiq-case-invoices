@@ -48,14 +48,16 @@ def test_1001_clean_has_no_blocking_flags(conn):
 
 
 def test_1002_exceeds_stock(conn):
-    """GadgetX x20 exceeds stock of 5; also over $10K with due date equal to invoice date."""
+    """GadgetX x20 exceeds stock of 5; also over $10K with due date equal to invoice date, all in plain words."""
     inv = Invoice(invoice_number="1002", vendor="Gadgets Co.", date=date(2026, 1, 30), due_date=date(2026, 1, 30),
                   items=[L("GadgetX", 20, "750")], total=D("15000.00"))
     flags = run_validation(conn, inv, "", [])
     assert "exceeds_stock" in codes(flags, "must_reject")
     assert {"over_10k", "due_before_or_on_invoice_date"} <= codes(flags, "needs_scrutiny")
-    msg = next(f.message for f in flags if f.code == "exceeds_stock")
-    assert msg == "GadgetX: 20 requested across 1 line(s), 5 in stock"
+    by_code = {f.code: f.message for f in flags}
+    assert by_code["exceeds_stock"] == "Ordered 20 GadgetX, only 5 in stock"
+    assert by_code["over_10k"] == "Total of $15,000.00 is over the $10,000 review threshold"
+    assert by_code["due_before_or_on_invoice_date"] == "Due date (30 Jan 2026) is on or before the invoice date"
 
 
 def test_1003_fake_item(conn):
@@ -77,10 +79,10 @@ def test_1008_and_1016_unknown_items(conn):
                   items=[L("WidgetA", 4, "250"), L("WidgetB", 2, "500"), L("WidgetC", 3, "350", sku=None, sku_suggestion="WidgetA")],
                   subtotal=D("3050.00"), tax=D("183.00"), total=D("3233.00"))
     f8 = [f for f in run_validation(conn, i8, "", []) if f.code == "unknown_item"]
-    assert [f.message.split(":")[0] for f in f8] == ["SuperGizmo", "MegaSprocket"]
+    assert [f.message for f in f8] == ["SuperGizmo isn't in inventory", "MegaSprocket isn't in inventory"]
     f16 = [f for f in run_validation(conn, i16, "", []) if f.code == "unknown_item"]
     assert len(f16) == 1 and f16[0].severity == "must_reject"
-    assert "WidgetC" in f16[0].message and "WidgetA" in f16[0].message
+    assert f16[0].message == "WidgetC isn't in inventory (did you mean WidgetA?)"
 
 
 def test_1009_data_integrity(conn):
@@ -102,8 +104,8 @@ def test_1013_aggregates_stock(conn):
                L("GadgetX", 1, "750", note="Sample")],
         subtotal=D("21040.00"), tax=D("1472.80"), total=D("22562.80"))
     flags = run_validation(conn, inv, "", [])
-    wa = next(f for f in flags if f.code == "exceeds_stock" and f.message.startswith("WidgetA"))
-    assert "22 requested across 3 line(s), 15 in stock" in wa.message
+    wa = next(f for f in flags if f.code == "exceeds_stock" and "WidgetA" in f.message)
+    assert wa.message == "Ordered 22 WidgetA across 3 lines, only 15 in stock"
     assert wa.field_path == "items[0]"
     assert "price_mismatch" in codes(flags, "needs_scrutiny")
 
@@ -117,7 +119,8 @@ def test_1010_rush_price_is_scrutiny_not_reject(conn):
                   subtotal=D("6700.00"), tax=D("335.00"), shipping=D("150.00"), total=D("7185.00"))
     flags = run_validation(conn, inv, "", [])
     pm = [f for f in flags if f.code == "price_mismatch"]
-    assert len(pm) == 1 and "300" in pm[0].message and "250.00" in pm[0].message and "rush order" in pm[0].message
+    assert len(pm) == 1
+    assert pm[0].message == "WidgetA charged $300.00, Acme's price is $250.00 (line note: rush order)"
     assert pm[0].field_path == "items[3].unit_price"
     assert not codes(flags, "must_reject")
 
@@ -263,7 +266,7 @@ def test_overbilled_total_is_must_reject(conn):
     flags = run_validation(conn, inv_1013(), "", [])
     over = [f for f in flags if f.code == "total_exceeds_line_items"]
     assert len(over) == 1 and over[0].severity == "must_reject" and over[0].field_path == "total"
-    assert "22562.80" in over[0].message and "22512.80" in over[0].message
+    assert over[0].message == "Total of $22,562.80 is more than the line items plus tax and shipping ($22,512.80)"
     assert "arithmetic_mismatch" in codes(flags, "needs_scrutiny")
 
 
@@ -292,7 +295,7 @@ def test_inflated_line_total_is_must_reject_and_caught_by_total_gate(conn):
     flags = run_validation(conn, inv_1001(items=items, subtotal=D("5100.00"), total=D("5100.00")), "", [])
     line = [f for f in flags if f.code == "line_total_exceeds_price"]
     assert len(line) == 1 and line[0].severity == "must_reject" and line[0].field_path == "items[0].line_total"
-    assert "2600.00" in line[0].message and "2500.00" in line[0].message
+    assert line[0].message == "Line 1 total of $2,600.00 is more than quantity × unit price ($2,500.00)"
     # The total gate uses qty x unit_price, so the inflated line does not raise the expected total.
     assert "total_exceeds_line_items" in codes(flags, "must_reject")
 

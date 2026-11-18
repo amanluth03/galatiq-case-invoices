@@ -1,7 +1,7 @@
 """Runs the pipeline graph for files: one file, a whole directory, or resuming a paused human review.
 Also builds the real runtime (Grok agents + SQLite checkpointer) and saves every run to the database.
 Batches run several files at once (each worker thread on its own runtime), then retry Grok timeouts once.
-The web screen calls process_file with on_stage and on_update to show each run's story live (including every
+The web screen calls process_file with on_update to show each run's story live (including every
 analyst/VP round inside the approval subgraph as it happens).
 """
 import logging
@@ -130,16 +130,6 @@ def _finish(graph, config: dict, run_id: str, paused: bool, deps: Deps) -> Pipel
     return state  # type: ignore[return-value]
 
 
-def _report_stage(on_stage: Callable[[str], None] | None, node: str, run_id: str) -> None:
-    """Tell the caller a node finished; a failing progress update is logged but never fails the run."""
-    if on_stage is None:
-        return
-    try:
-        on_stage(node)
-    except Exception as exc:
-        log.warning("stage update failed", extra={"fields": {"run_id": run_id, "node": node, "error": str(exc)}})
-
-
 def _report_update(on_update: Callable[[tuple, str, dict], None] | None, namespace: tuple, node: str, update,
                    run_id: str) -> None:
     """Hand one node's output (top level or inside a subgraph) to the caller; a failing callback never fails the run."""
@@ -152,12 +142,10 @@ def _report_update(on_update: Callable[[tuple, str, dict], None] | None, namespa
 
 
 def process_file(path: Path, deps: Deps, graph, run_id: str | None = None,
-                 on_stage: Callable[[str], None] | None = None,
                  on_update: Callable[[tuple, str, dict], None] | None = None) -> PipelineState:
     """Run one invoice file through the graph and save the result; never raises for a bad file.
-    run_id: use this id (the web screen creates the run row first); on_stage: called with each top-level node name
-    as it finishes; on_update: called with (namespace, node, update) for every node, () being the top level and
-    ("approval:<id>", ...) the analyst/VP loop, so the screen can show each round as it arrives."""
+    run_id: use this id (the web screen creates the run row first); on_update: called with (namespace, node, update)
+    for every node, () being the top level and ("approval:<id>", ...) the analyst/VP loop, so the screen can show each round as it arrives."""
     path = Path(path)
     run_id = run_id or uuid.uuid4().hex[:12]
     content_hash = None
@@ -199,7 +187,6 @@ def process_file(path: Path, deps: Deps, graph, run_id: str | None = None,
                 log.info("node_completed", extra={"fields": {
                     "run_id": run_id, "node": node, "duration_ms": round((now - last) * 1000), **_summary(update)}})
                 last = now
-                _report_stage(on_stage, node, run_id)
                 _report_update(on_update, namespace, node, update, run_id)
         return _finish(graph, config, run_id, paused, deps)
     except Exception as exc:

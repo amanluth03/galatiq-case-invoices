@@ -17,6 +17,12 @@ def test_reads_pdf_text_layer():
     assert "WidgetB" in result.raw_text
     assert result.format == "pdf"
     assert result.issues == []
+    assert result.page_count == 1
+
+
+def test_text_formats_have_no_page_count():
+    """Only PDFs report pages; a text invoice's page_count stays None."""
+    assert read_file(INVOICES / "invoice_1001.txt").page_count is None
 
 
 def test_reads_json_verbatim():

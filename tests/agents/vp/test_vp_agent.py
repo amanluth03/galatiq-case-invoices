@@ -31,6 +31,11 @@ def test_vp_reviews_current_recommendation(tmp_path):
     assert "## Analyst recommendation to review" in user.content and "looks fine to me" in user.content
 
 
+def test_vp_prompt_asks_for_plain_words():
+    """The VP writes for a finance reader and never quotes internal flag codes."""
+    assert "never mention internal flag codes such as price_mismatch" in VP_PROMPT
+
+
 def test_vp_prompt_states_no_history_rule():
     """The VP prompt says it has no history tool and must send back when evidence is missing."""
     assert "no invoice-history tool" in VP_PROMPT and "SEND_BACK" in VP_PROMPT

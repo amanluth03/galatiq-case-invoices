@@ -1,5 +1,5 @@
 """End-to-end tests for the top-level pipeline graph (read -> extract -> validate -> approval -> guardrail -> pay/reject/human review).
-All LLM roles are scripted fakes and payment is a recording fake, so these run offline.
+A broken hard rule (must_reject) is rejected in validate without the analyst/VP. All LLM roles are scripted fakes and payment is a recording fake, so these run offline.
 """
 from decimal import Decimal
 from pathlib import Path
@@ -72,6 +72,17 @@ def run(graph, name, run_id="run-1"):
     return result, config
 
 
+def paused_before_shortcut(monkeypatch, graph, name):
+    """Pause a must_reject invoice at human_review the way runs saved before the hard-rule shortcut could be.
+    The shortcut is switched off only for the first run; resuming uses the real code."""
+    import invoice_agent.graph as graph_module
+    with monkeypatch.context() as m:
+        m.setattr(graph_module, "apply_guardrail", lambda flags: None)
+        out, config = run(graph, name)
+    assert "__interrupt__" in out
+    return config
+
+
 def send_backs(n=3):
     """n VP SEND_BACK reviews, enough to exhaust the approval rounds."""
     return [make_review(verdict="SEND_BACK", final_decision=None, feedback=f"fb {i}") for i in range(n)]
@@ -89,20 +100,18 @@ def test_clean_invoice_is_paid(conn):
     assert len(ex.calls) == 1 and len(a.calls) == 1 and len(v.calls) == 1
 
 
-def test_guardrail_blocks_agent_approval_over_must_reject(conn):
-    """1002 (20 GadgetX, 5 in stock): agents approve, but the guardrail forces REJECT and nothing is paid."""
+def test_hard_rule_rejects_without_the_agents(conn):
+    """1002 (20 GadgetX, 5 in stock) is rejected by the rules straight after validate: no analyst/VP call, no payment."""
     ex = ScriptedIngestionAgent([extracted_1002()])
-    a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)])
-    v = ScriptedVP([make_review()])
+    a, v = ScriptedAnalyst([]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1002.txt")
     final = out["final"]
     assert final.status == "REJECTED" and final.decided_by == "guardrail"
-    assert final.reasoning.startswith("Blocked by guardrail: ")
-    assert "GadgetX" in final.reasoning
-    assert out["approval"].decision == "APPROVE"
+    assert final.reasoning == "Rejected by the rules: Ordered 20 GadgetX, only 5 in stock."
+    assert out.get("approval") is None
     assert len(pay.calls) == 0
-    assert len(ex.calls) == 1 and len(a.calls) == 1 and len(v.calls) == 1
+    assert len(ex.calls) == 1 and len(a.calls) == 0 and len(v.calls) == 0
 
 
 def test_agent_reject_logs_reasoning(conn):
@@ -159,13 +168,13 @@ def test_human_reject_logs_rejection(conn):
     assert len(pay.calls) == 0
 
 
-def test_human_approve_over_must_reject_requires_justification(conn):
-    """Approving 1002 over its must_reject flag fails without a justification, then succeeds with one."""
+def test_human_approve_over_must_reject_requires_justification(conn, monkeypatch):
+    """A 1002 run paused before the shortcut existed: approving over its must_reject flag needs a justification."""
     ex = ScriptedIngestionAgent([extracted_1002()])
     a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)] * 3)
     v = ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
-    _, config = run(graph, "invoice_1002.txt")
+    config = paused_before_shortcut(monkeypatch, graph, "invoice_1002.txt")
     with pytest.raises(ValueError, match="justification required"):
         graph.invoke(Command(resume={"decision": "APPROVE", "note": "fine", "justification": "  "}), config)
     assert len(pay.calls) == 0
@@ -279,26 +288,26 @@ def test_reused_thread_does_not_carry_over_previous_outcome(conn):
 
 
 def test_reused_thread_after_guardrail_block_uses_new_decision(conn):
-    """A guardrail block in run 1 must not be replayed as the rejection reason of a later agent REJECT on the same thread."""
-    ex = ScriptedIngestionAgent([extracted_1002(), extracted_1002()])
-    a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST), make_recommendation("REJECT", checklist=FULL_CHECKLIST)])
-    v = ScriptedVP([make_review(), make_review(final_decision="REJECT", reasoning="stock short")])
+    """A hard-rule rejection in run 1 must not be replayed as the rejection reason of a later agent REJECT on the same thread."""
+    ex = ScriptedIngestionAgent([extracted_1002(), make_extracted()])
+    a = ScriptedAnalyst([make_recommendation("REJECT")])
+    v = ScriptedVP([make_review(final_decision="REJECT", reasoning="no PO on file")])
     graph, pay = make_graph(conn, ex, a, v)
     first, _ = run(graph, "invoice_1002.txt", "same")
-    second, _ = run(graph, "invoice_1002.txt", "same")
+    second, _ = run(graph, "invoice_1001.txt", "same")
     assert first["final"].decided_by == "guardrail"
-    assert second["final"].decided_by == "agents" and second["final"].reasoning == "stock short"
+    assert second["final"].decided_by == "agents" and second["final"].reasoning == "no PO on file"
     assert len(pay.calls) == 0
 
 
 @pytest.mark.parametrize("field", ["vendor", "total"])
-def test_pay_refuses_missing_vendor_or_total(conn, field):
+def test_pay_refuses_missing_vendor_or_total(conn, field, monkeypatch):
     """Even a justified human APPROVE cannot pay an invoice with no vendor or total: ERROR, and pay is never called."""
     ex = ScriptedIngestionAgent([make_extracted(**{field: ExtractedField(value=None, raw=None, confidence="low")})])
     a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
     graph, pay = make_graph(conn, ex, a, v)
-    first, config = run(graph, "invoice_1001.txt")
-    assert "__interrupt__" in first
+    # Missing vendor/total is a hard rule, so only a run paused before the shortcut can reach a human here.
+    config = paused_before_shortcut(monkeypatch, graph, "invoice_1001.txt")
     out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "", "justification": "I know them"}), config)
     assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
     assert out["final"].reasoning == "cannot pay: missing vendor/total"
@@ -319,13 +328,13 @@ def test_sqlite_checkpoint_round_trip_has_no_unregistered_types(conn, tmp_path):
     unregister = register_serde_event_listener(events.append)
     cp = sqlite3.connect(tmp_path / "checkpoints.db", check_same_thread=False)
     try:
-        ex = ScriptedIngestionAgent([extracted_1002()])
-        a = ScriptedAnalyst([make_recommendation(checklist=FULL_CHECKLIST)] * 3)
+        ex = ScriptedIngestionAgent([make_extracted()])
+        a = ScriptedAnalyst([make_recommendation()] * 3)
         pay = RecordingPay()
         deps = Deps(ingestion=ex, analyst=a, vp=ScriptedVP(send_backs()), pay=pay, conn=conn)
         graph = build_graph(deps, SqliteSaver(cp, serde=make_serializer()))
-        _, config = run(graph, "invoice_1002.txt")
-        out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "ok", "justification": "agreed"}), config)
+        _, config = run(graph, "invoice_1001.txt")
+        out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "ok", "justification": None}), config)
         state = graph.get_state(config).values
     finally:
         unregister()
@@ -377,21 +386,20 @@ def test_agent_reject_over_price_mismatch_goes_to_human(conn):
     assert len(pay.calls) == 0
 
 
-def test_agent_reject_with_must_reject_and_price_mismatch_stays_rejected(conn):
-    """A hard-rule flag plus a price difference is still rejected by the agents' REJECT, with no person step."""
+def test_must_reject_with_price_mismatch_is_rejected_without_agents_or_person(conn):
+    """A hard-rule flag plus a price difference is rejected by the rules: no agents, no person step."""
     # 1002 again, but GadgetX billed at $800 instead of the $750 reference: exceeds_stock plus price_mismatch.
     ex = ScriptedIngestionAgent([make_extracted(
         invoice_number="1002", vendor="Gadgets Co.", date="2026-01-30", due_date="2026-01-30",
         subtotal=None, tax=None, total="16000.00", payment_terms="Net 30",
         items=[ExtractedLineItem(name=_f("GadgetX"), qty=_f("20"), unit_price=_f("800"))])])
-    a = ScriptedAnalyst([make_recommendation("REJECT")])
-    v = ScriptedVP([make_review(final_decision="REJECT", reasoning="not enough stock")])
+    a, v = ScriptedAnalyst([]), ScriptedVP([])
     graph, pay = make_graph(conn, ex, a, v)
     out, _ = run(graph, "invoice_1002.txt")
     codes = {f.code for f in out["flags"]}
     assert {"exceeds_stock", "price_mismatch"} <= codes
-    assert out["final"].status == "REJECTED" and "__interrupt__" not in out
-    assert len(pay.calls) == 0
+    assert out["final"].status == "REJECTED" and out["final"].decided_by == "guardrail" and "__interrupt__" not in out
+    assert len(pay.calls) == 0 and len(a.calls) == 0 and len(v.calls) == 0
 
 
 def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path):
@@ -415,16 +423,3 @@ def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path
     assert {(f.severity, f.code) for f in out["flags"]} == {("needs_scrutiny", "over_10k"), ("info", "urgency_language")}
     assert out["final"].status == "PAID" and out["final"].decided_by == "agents"
     assert pay.calls == [("Widgets Inc.", Decimal("12500.00"))]
-
-
-def test_approval_failure_with_must_reject_fails_closed(conn):
-    """If the agents time out on 1002 (exceeds stock), the run still ends REJECTED by the guardrail, not ERROR; nothing is paid."""
-    ex = ScriptedIngestionAgent([extracted_1002()])
-    a, v = ScriptedAnalyst([RuntimeError("Request timed out.")]), ScriptedVP([])
-    graph, pay = make_graph(conn, ex, a, v)
-    out, _ = run(graph, "invoice_1002.txt")
-    final = out["final"]
-    assert final.status == "REJECTED" and final.decided_by == "guardrail"
-    assert "GadgetX: 20 requested" in final.reasoning
-    assert "The agents' write-up was unavailable (Grok didn't respond)" in final.reasoning
-    assert len(pay.calls) == 0

@@ -28,4 +28,6 @@ If the VP sent back an earlier draft, address every point of their feedback in t
 List anything you could not resolve in "open_questions".
 
 A well-argued REJECT is a good outcome. Never approve just to be agreeable.
+
+Write for a finance reader: never mention internal flag codes such as price_mismatch; describe the issue in plain words.
 """

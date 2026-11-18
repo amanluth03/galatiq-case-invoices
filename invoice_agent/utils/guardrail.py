@@ -1,5 +1,5 @@
-"""Guardrail stage: the last code check between an agent APPROVE and payment.
-Any must_reject flag overrides the agents and forces REJECT; an invoice whose only problems are money differences
+"""Guardrail rules: the code checks that sit above the agents.
+Any must_reject flag forces REJECT (validate applies it straight away, so those invoices skip the agents); an invoice whose only problems are money differences
 (price, arithmetic, unprinted-amount or non-USD flags) goes to a person whatever the agents decided. A human APPROVE skips this stage."""
 from invoice_agent.models import Flag, FinalOutcome
 
@@ -11,13 +11,14 @@ HUMAN_REVIEW_REASON = ("Prices, totals or currency differ from Acme's records. "
 
 
 def apply_guardrail(flags: list[Flag]) -> FinalOutcome | None:
-    """Return a forced REJECTED outcome if any flag is must_reject, else None (payment may proceed)."""
+    """Return a forced REJECTED outcome listing every must_reject flag in plain words, else None (payment may proceed)."""
     blocking = [f.message for f in flags if f.severity == "must_reject"]
     if not blocking:
         return None
     return FinalOutcome(
         status="REJECTED", decided_by="guardrail",
-        reasoning="Blocked by guardrail: " + "; ".join(blocking),
+        # e.g. "Rejected by the rules: WidgetC isn't in inventory. Ordered 20 GadgetX, only 5 in stock."
+        reasoning="Rejected by the rules: " + ". ".join(m.rstrip(".") for m in blocking) + ".",
     )
 
 

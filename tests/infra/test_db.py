@@ -58,6 +58,23 @@ def test_list_runs_puts_needs_review_first(tmp_path):
     assert [r["run_id"] for r in db.list_runs(conn)] == ["b", "c", "a"]
 
 
+def test_save_progress_stamps_when_each_step_starts(tmp_path):
+    """A new stage stamps step_started_at (kept for later saves in the same step); new_step=True stamps without a stage."""
+    conn = _conn(tmp_path)
+    db.create_pending_run(conn, "r1", "x.txt", "h1")
+    partial = {"run_id": "r1"}
+    db.save_progress(conn, "r1", "read", partial)
+    first = db.get_run(conn, "r1")["state"]["step_started_at"]
+    # A tool lookup inside the same step keeps the start time.
+    db.save_progress(conn, "r1", None, partial)
+    assert db.get_run(conn, "r1")["state"]["step_started_at"] == first
+    partial["step_started_at"] = "2000-01-01T00:00:00+00:00"
+    # The analyst finishing a round starts the VP's step: the caller says so with new_step=True.
+    db.save_progress(conn, "r1", None, partial, new_step=True)
+    stamped = db.get_run(conn, "r1")["state"]["step_started_at"]
+    assert stamped > "2000-01-01" and stamped.endswith("+00:00")
+
+
 def test_find_runs_by_invoice_number_excludes_self(tmp_path):
     """Invoice-number lookup omits the current run (double-billing check)."""
     conn = _conn(tmp_path)

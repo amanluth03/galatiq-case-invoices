@@ -56,8 +56,11 @@ def test_ingestion_agent_exception_then_success():
 def test_all_attempts_raise():
     """If the ingestion agent raises on every attempt, ExtractionFailed is raised."""
     ex = ScriptedIngestionAgent([RuntimeError("boom")] * 3)
-    with pytest.raises(ExtractionFailed):
+    with pytest.raises(ExtractionFailed) as err:
         run_extraction("raw", ex, SKUS)
+    # A plain sentence for the reviewer, not Python list text like "['previous attempt failed: boom']".
+    assert str(err.value) == ("The ingestion agent couldn't read this invoice after 3 attempts. "
+                              "Last problem: previous attempt failed: boom.")
 
 
 def test_later_exception_keeps_last_successful_result():

@@ -173,8 +173,16 @@ def set_stage(conn: sqlite3.Connection, run_id: str, stage: str) -> None:
     conn.commit()
 
 
-def save_progress(conn: sqlite3.Connection, run_id: str, stage: str | None, partial_state: dict) -> None:
-    """Store a running run's partial state (and its new stage, if given) so the screen can tell its story live."""
+def save_progress(conn: sqlite3.Connection, run_id: str, stage: str | None, partial_state: dict,
+                  new_step: bool | None = None) -> None:
+    """Store a running run's partial state (and its new stage, if given) so the screen can tell its story live.
+    new_step (default: a stage was given) stamps partial_state["step_started_at"], the UTC ISO time the next step began."""
+    if new_step is None:
+        new_step = stage is not None
+    if new_step:
+        # Kept in the caller's dict too, so later saves within the same step (tool lookups) keep the start time;
+        # the screen uses it to say a step is taking unusually long.
+        partial_state["step_started_at"] = datetime.now(timezone.utc).isoformat()
     # Only while PROCESSING: a late progress write must never overwrite a finished run's saved result.
     conn.execute(
         "UPDATE runs SET stage = COALESCE(?, stage), state_json = ? WHERE run_id = ? AND status = 'PROCESSING'",

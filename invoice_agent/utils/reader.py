@@ -28,6 +28,8 @@ class ReadResult(BaseModel):
     # sha256 of the file bytes: used to spot exact duplicate submissions.
     content_hash: str
     issues: list[str] = []
+    # Number of pages for a PDF; None for text formats.
+    page_count: int | None = None
 
 
 def _clean(text: str) -> str:
@@ -45,6 +47,7 @@ def read_file(path: Path) -> ReadResult:
         raise UnsupportedFormatError(f"unsupported file extension: {path.suffix!r}")
     fmt = suffix[1:]
     issues: list[str] = []
+    page_count = None
     if fmt == "pdf":
         with pdfplumber.open(path) as pdf:
             # layout=True keeps table columns aligned so line items stay readable.
@@ -52,6 +55,7 @@ def read_file(path: Path) -> ReadResult:
         if not any(p.strip() for p in pages):
             issues.append(NO_TEXT_ISSUE)
         text = "\n".join(pages)
+        page_count = len(pages)
     else:
         # Structured formats (JSON/CSV/XML) stay raw text on purpose: they contain bad values and odd layouts the LLM must interpret.
         text = path.read_text("utf-8")
@@ -61,4 +65,5 @@ def read_file(path: Path) -> ReadResult:
         source_path=str(path),
         content_hash=hashlib.sha256(path.read_bytes()).hexdigest(),
         issues=issues,
+        page_count=page_count,
     )

@@ -166,6 +166,8 @@ class PipelineState(TypedDict, total=False):
     format: str
     content_hash: str
     raw_text: str
+    # PDFs only: how many pages the file has (the story shows "PDF, 2 pages").
+    page_count: int | None
     invoice: Invoice
     fingerprint: str
     duplicate_of: str | None

@@ -1,4 +1,4 @@
-"""Tests for the guardrail rules: must_reject blocks an agent APPROVE; money-only differences go to a person whatever the agents decided."""
+"""Tests for the guardrail rules: must_reject forces a rejection; money-only differences go to a person whatever the agents decided."""
 from invoice_agent.models import Flag
 from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON, apply_guardrail, needs_person
 
@@ -15,10 +15,11 @@ def test_no_must_reject_lets_payment_through():
 
 
 def test_must_reject_forces_rejection_with_messages():
-    """Must-reject flags produce a REJECTED outcome decided by the guardrail, listing every blocking message."""
-    out = apply_guardrail([flag("must_reject", "A short"), flag("needs_scrutiny", "x"), flag("must_reject", "B gone")])
+    """Must-reject flags produce a REJECTED outcome decided by the guardrail, listing every blocking message as a sentence."""
+    out = apply_guardrail([flag("must_reject", "WidgetC isn't in inventory"), flag("needs_scrutiny", "x"),
+                           flag("must_reject", "Ordered 20 GadgetX, only 5 in stock")])
     assert out.status == "REJECTED" and out.decided_by == "guardrail"
-    assert out.reasoning == "Blocked by guardrail: A short; B gone"
+    assert out.reasoning == "Rejected by the rules: WidgetC isn't in inventory. Ordered 20 GadgetX, only 5 in stock."
 
 
 def test_money_differences_need_a_person_for_either_recommendation():

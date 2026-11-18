@@ -1,4 +1,5 @@
 """The top-level pipeline graph: read -> extract -> validate -> approval -> guardrail -> pay / log_rejection / human_review.
+A hard rule (any must_reject flag) skips the analyst and VP and goes straight to log_rejection: they couldn't change it.
 Code decides every step; the LLM roles (ingestion agent, analyst, VP) and payment are injected through Deps so tests can use fakes.
 """
 import inspect
@@ -55,14 +56,9 @@ def make_serializer() -> JsonPlusSerializer:
     return JsonPlusSerializer(allowed_msgpack_modules=[*ours, ApprovalContext])
 
 
-# Added to a rule-based rejection when the analyst/VP call failed: the outcome stands without their write-up.
-AGENTS_UNAVAILABLE_NOTE = ("The agents' write-up was unavailable (Grok didn't respond), "
-                           "but these rules block payment on their own.")
-
-
 # Keys a run produces. read clears them so a re-run on the same thread_id never sees the last run's results.
 _RUN_RESET: dict = {
-    "invoice": None, "fingerprint": None, "duplicate_of": None, "flags": [], "uncertainties": [],
+    "page_count": None, "invoice": None, "fingerprint": None, "duplicate_of": None, "flags": [], "uncertainties": [],
     "extraction_issues": [], "approval": None, "human_decision": None, "guardrail_outcome": None,
     "final": None, "error": None,
 }
@@ -81,7 +77,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         # Reader issues (e.g. scanned PDF) travel with extraction issues so validation flags them.
         return Command(goto="extract", update={
             **_RUN_RESET, "raw_text": r.raw_text, "format": r.format, "source_path": r.source_path,
-            "content_hash": r.content_hash, "extraction_issues": r.issues,
+            "content_hash": r.content_hash, "page_count": r.page_count, "extraction_issues": r.issues,
         })
 
     def extract(state: PipelineState) -> Command[Literal["validate", "fail"]]:
@@ -96,8 +92,9 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
             "extraction_issues": [*state.get("extraction_issues", []), *res.issues],
         })
 
-    def validate(state: PipelineState) -> Command[Literal["mark_duplicate", "approval", "fail"]]:
-        """Run the rulebook and the duplicate check; an exact duplicate stops here, everything else goes to the agents."""
+    def validate(state: PipelineState) -> Command[Literal["mark_duplicate", "approval", "log_rejection", "fail"]]:
+        """Run the rulebook and the duplicate check; an exact duplicate stops here, a broken hard rule is rejected
+        here (no analyst/VP discussion), everything else goes to the agents."""
         inv = state["invoice"]
         try:
             flags = run_validation(deps.conn, inv, state["raw_text"], state.get("extraction_issues", []))
@@ -106,10 +103,15 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         except Exception as exc:
             # A bug or DB error here must end the run as ERROR, never crash the caller.
             return Command(goto="fail", update={"error": _error_text(exc)})
-        goto = "mark_duplicate" if dup.duplicate_of else "approval"
-        return Command(goto=goto, update={
-            "flags": [*flags, *dup.flags], "fingerprint": fp, "duplicate_of": dup.duplicate_of,
-        })
+        flags = [*flags, *dup.flags]
+        update = {"flags": flags, "fingerprint": fp, "duplicate_of": dup.duplicate_of}
+        if dup.duplicate_of:
+            return Command(goto="mark_duplicate", update=update)
+        forced = apply_guardrail(flags)
+        if forced is not None:
+            # Shortcut: a must_reject flag decides the outcome whatever the agents say, so skip their ~18 s discussion.
+            return Command(goto="log_rejection", update={**update, "guardrail_outcome": forced})
+        return Command(goto="approval", update=update)
 
     def mark_duplicate(state: PipelineState) -> dict:
         """End the run as DUPLICATE, pointing at the original run."""
@@ -120,8 +122,8 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
 
     def approval(state: PipelineState) -> Command[Literal["guardrail", "log_rejection", "human_review", "fail"]]:
         """Run the analyst <-> VP loop; APPROVE must still pass the guardrail, REJECT is logged, unsettled goes to a human.
-        An invoice with only money differences goes to a person whether the agents said APPROVE or REJECT.
-        If the agents fail, a must_reject flag still rejects the invoice; otherwise the run ends as ERROR."""
+        An invoice with money differences goes to a person whether the agents said APPROVE or REJECT.
+        Only invoices with no must_reject flag get here (validate rejects those), so an agent failure ends as ERROR."""
         ctx = ApprovalContext(
             invoice=state["invoice"], flags=state.get("flags", []),
             uncertainties=state.get("uncertainties", []), policy=APPROVAL_POLICY,
@@ -129,11 +131,6 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         try:
             out = approval_graph.invoke({"context": ctx, "rounds": [], "outcome": None})
         except Exception as exc:
-            forced = apply_guardrail(state.get("flags", []))
-            if forced is not None:
-                # Fail closed: a must_reject flag already decides the outcome, so a Grok timeout here still rejects.
-                forced = forced.model_copy(update={"reasoning": f"{forced.reasoning}. {AGENTS_UNAVAILABLE_NOTE}"})
-                return Command(goto="log_rejection", update={"guardrail_outcome": forced})
             # E.g. Grok timeout or malformed agent output on a clean invoice: no decision means ERROR, not a crash.
             return Command(goto="fail", update={"error": _error_text(exc)})
         outcome = out["outcome"]
@@ -150,13 +147,14 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         flags = state.get("flags", [])
         forced = apply_guardrail(flags)
         if forced is not None:
-            # must_reject wins over everything.
+            # Defence in depth: validate already rejects must_reject invoices, so this should never fire.
             return Command(goto="log_rejection", update={"guardrail_outcome": forced})
         return Command(goto="pay")
 
     def human_review(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
         """Pause for a human decision; on resume, a human APPROVE goes straight to pay (it overrides the guardrail)."""
-        # With must_reject flags the resume schema itself demands a justification for APPROVE. Checking inside
+        # A run paused before hard-rule invoices skipped the agents can still carry must_reject flags:
+        # with them the resume schema itself demands a justification for APPROVE. Checking inside
         # the schema matters: LangGraph saves a resume answer only once it validates, so a rejected answer
         # leaves the run paused and the reviewer can resume again (a check after interrupt() would save it).
         schema = JustifiedHumanDecision if _has_must_reject(state) else HumanDecision
@@ -195,7 +193,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
         """Record the rejection and who made it (guardrail, human or agents); the runner persists the full state."""
         forced = state.get("guardrail_outcome")
         if forced:
-            # The guardrail blocked an agent APPROVE in this run (read clears it at the start of every run).
+            # A hard rule rejected it in this run, in validate or the guardrail (read clears it at the start of every run).
             return {"final": forced}
         human = state.get("human_decision")
         if human:

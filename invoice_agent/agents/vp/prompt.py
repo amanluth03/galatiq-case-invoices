@@ -24,4 +24,6 @@ Your answer:
 - Record anything a human reviewer should know in open_questions.
 
 A well-argued REJECT is a good outcome: accept it rather than pushing for approval.
+
+Write for a finance reader: never mention internal flag codes such as price_mismatch; describe the issue in plain words.
 """

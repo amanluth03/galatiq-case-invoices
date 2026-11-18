@@ -1,5 +1,6 @@
 """The deterministic rulebook: each check turns an Invoice into severity-tagged Flags.
-Sits in the validate stage (read -> extract -> validate -> approval ...); checks advise, they do not decide.
+Sits in the validate stage (read -> extract -> validate -> approval ...). Messages are plain words with formatted
+money and dates, because the review screen, the agents and the rejection reason all show them as written.
 """
 import re
 import sqlite3
@@ -9,11 +10,7 @@ from invoice_agent.utils.arithmetic import line_overcharges, lines_plus_charges,
 from invoice_agent.infra.config import SCRUTINY_THRESHOLD
 from invoice_agent.infra.db import get_inventory
 from invoice_agent.models import Flag, Invoice
-
-
-def _fmt(d: Decimal) -> str:
-    """Plain-notation number without trailing zeros (20, not 2E+1)."""
-    return format(d.normalize(), "f")
+from invoice_agent.utils.formatting import money, nice_date, quantity
 
 
 def check_required(inv: Invoice) -> list[Flag]:
@@ -37,17 +34,17 @@ def check_quantities(inv: Invoice) -> list[Flag]:
         if it.sku is not None and it.qty is None:
             flags.append(Flag(
                 severity="must_reject", code="missing_quantity",
-                message=f"{it.name_raw}: quantity is missing", field_path=f"items[{i}].qty",
+                message=f"{it.name_raw} has no quantity", field_path=f"items[{i}].qty",
             ))
         if it.qty is not None and it.qty <= 0:
             flags.append(Flag(
                 severity="must_reject", code="non_positive_quantity",
-                message=f"{it.name_raw}: quantity {_fmt(it.qty)} is not positive", field_path=f"items[{i}]",
+                message=f"{it.name_raw} has a quantity of {quantity(it.qty)}, which isn't positive", field_path=f"items[{i}]",
             ))
     if inv.total is not None and inv.total < 0:
         flags.append(Flag(
             severity="must_reject", code="negative_total",
-            message=f"Total is negative ({inv.total})", field_path="total",
+            message=f"Total of {money(inv.total, inv.currency)} is negative", field_path="total",
         ))
     return flags
 
@@ -57,7 +54,7 @@ def check_items(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
     flags = []
     for i, it in enumerate(inv.items):
         if it.sku is None:
-            msg = f"{it.name_raw}: not in inventory"
+            msg = f"{it.name_raw} isn't in inventory"
             if it.sku_suggestion:
                 msg += f" (did you mean {it.sku_suggestion}?)"
             flags.append(Flag(severity="must_reject", code="unknown_item", message=msg, field_path=f"items[{i}]"))
@@ -66,11 +63,11 @@ def check_items(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
         # Fail-safe: a SKU that vanished from inventory is treated as unknown, never waved through.
         if inv_row is None:
             flags.append(Flag(severity="must_reject", code="unknown_item",
-                              message=f"{it.name_raw}: SKU {it.sku} not found in inventory", field_path=f"items[{i}]"))
+                              message=f"{it.name_raw} ({it.sku}) isn't in inventory", field_path=f"items[{i}]"))
         elif inv_row["stock"] == 0:
             flags.append(Flag(
                 severity="must_reject", code="zero_stock_item",
-                message=f"{it.sku}: zero stock, suspicious item", field_path=f"items[{i}]",
+                message=f"{it.sku} has zero stock, a suspicious item", field_path=f"items[{i}]",
             ))
     return flags
 
@@ -90,9 +87,11 @@ def check_stock(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
     for sku, (qty, lines, first) in totals.items():
         inv_row = get_inventory(conn, sku)
         if inv_row is not None and qty > inv_row["stock"]:
+            # e.g. "Ordered 20 GadgetX, only 5 in stock"; 1013 orders WidgetA on 3 lines, so the line count is said.
+            across = f" across {lines} lines" if lines > 1 else ""
             flags.append(Flag(
                 severity="must_reject", code="exceeds_stock",
-                message=f"{sku}: {_fmt(qty)} requested across {lines} line(s), {inv_row['stock']} in stock",
+                message=f"Ordered {quantity(qty)} {sku}{across}, only {inv_row['stock']} in stock",
                 field_path=f"items[{first}]",
             ))
     return flags
@@ -108,12 +107,13 @@ def check_prices(inv: Invoice, conn: sqlite3.Connection) -> list[Flag]:
         if it.unit_price is None:
             flags.append(Flag(
                 severity="needs_scrutiny", code="missing_unit_price",
-                message=f"{it.name_raw}: unit price is missing", field_path=f"items[{i}].unit_price",
+                message=f"{it.name_raw} has no unit price", field_path=f"items[{i}].unit_price",
             ))
             continue
         inv_row = get_inventory(conn, it.sku)
         if inv_row is not None and it.unit_price != inv_row["unit_price"]:
-            msg = f"{it.sku}: invoiced at {it.unit_price}, reference price is {inv_row['unit_price']}"
+            msg = (f"{it.sku} charged {money(it.unit_price, inv.currency)}, "
+                   f"Acme's price is {money(inv_row['unit_price'])}")
             if it.note:
                 msg += f" (line note: {it.note})"
             flags.append(Flag(
@@ -139,17 +139,19 @@ def check_arithmetic(inv: Invoice) -> list[Flag]:
         # Fail closed: a total we cannot check against its lines must not be paid.
         if inv.total is not None:
             flags.append(Flag(severity="must_reject", code="total_unverifiable", field_path="total",
-                              message="line amounts are too large to compute, so the total cannot be verified"))
+                              message="Line amounts are too large to compute, so the total can't be verified"))
         return flags
     for i, stated, computed in overcharged:
         flags.append(Flag(
             severity="must_reject", code="line_total_exceeds_price", field_path=f"items[{i}].line_total",
-            message=f"items[{i}]: line_total {stated} is more than qty x unit_price = {computed}",
+            message=f"Line {i + 1} total of {money(stated, inv.currency)} is more than quantity × unit price "
+                    f"({money(computed, inv.currency)})",
         ))
     if inv.total is not None and expected is not None and inv.total > expected:
         flags.append(Flag(
             severity="must_reject", code="total_exceeds_line_items", field_path="total",
-            message=f"stated total {inv.total:.2f} is more than line items + tax + shipping = {expected:.2f}",
+            message=f"Total of {money(inv.total, inv.currency)} is more than the line items plus tax and "
+                    f"shipping ({money(expected, inv.currency)})",
         ))
     return flags
 
@@ -162,7 +164,7 @@ def check_dates(inv: Invoice) -> list[Flag]:
     # Only invoice-internal consistency counts: old sample invoices would all be "overdue" against today.
     if inv.date is not None and inv.due_date <= inv.date:
         return [Flag(severity="needs_scrutiny", code="due_before_or_on_invoice_date",
-                     message=f"Due date {inv.due_date} is on or before invoice date {inv.date}", field_path="due_date")]
+                     message=f"Due date ({nice_date(inv.due_date)}) is on or before the invoice date", field_path="due_date")]
     return []
 
 
@@ -170,7 +172,7 @@ def check_currency(inv: Invoice) -> list[Flag]:
     """Scrutinize non-USD invoices (1014 EUR); prices are not FX-converted."""
     if inv.currency.upper() != "USD":
         return [Flag(severity="needs_scrutiny", code="non_usd_currency",
-                     message=f"Invoice currency is {inv.currency}, not USD", field_path="currency")]
+                     message=f"Invoice is in {inv.currency}, not US dollars", field_path="currency")]
     return []
 
 
@@ -178,7 +180,8 @@ def check_amount(inv: Invoice) -> list[Flag]:
     """Scrutinize totals above the $10K threshold."""
     if inv.total is not None and inv.total > SCRUTINY_THRESHOLD:
         return [Flag(severity="needs_scrutiny", code="over_10k",
-                     message=f"Total {inv.total} exceeds {SCRUTINY_THRESHOLD}", field_path="total")]
+                     message=f"Total of {money(inv.total, inv.currency)} is over the "
+                             f"{money(SCRUTINY_THRESHOLD).removesuffix('.00')} review threshold", field_path="total")]
     return []
 
 
@@ -223,7 +226,7 @@ def check_amounts_in_source(inv: Invoice, raw_text: str) -> list[Flag]:
             in_source = False
         if not in_source:
             flags.append(Flag(severity="needs_scrutiny", code="amount_not_in_source", field_path=path,
-                              message=f"{path}: {value} does not appear anywhere in the source document"))
+                              message=f"{path}: {money(value, inv.currency)} isn't printed anywhere on the invoice"))
     return flags
 
 
@@ -237,5 +240,5 @@ def check_red_flags(inv: Invoice, raw_text: str) -> list[Flag]:
                           message="Urgency/payment-pressure language: " + ", ".join(hits), field_path="notes"))
     if re.search(r"formerly", text):
         flags.append(Flag(severity="info", code="vendor_name_change",
-                          message="Text mentions a former vendor name ('formerly')", field_path="vendor"))
+                          message="The invoice mentions a former vendor name (\"formerly\")", field_path="vendor"))
     return flags

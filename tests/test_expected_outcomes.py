@@ -87,11 +87,13 @@ def test_every_sample_was_processed(outcomes):
 @pytest.mark.live
 @pytest.mark.parametrize("name", sorted(MUST_REJECT))
 def test_rulebook_rejects(outcomes, name):
-    """Invoices that break a hard rule (stock, unknown item, bad data, reused number) end REJECTED with that flag."""
+    """Invoices that break a hard rule (stock, unknown item, bad data, reused number) end REJECTED with that flag,
+    decided by the rules without the analyst/VP discussion."""
     state = outcomes[name]
     codes = _must_reject_codes(state)
     assert state["final"].status == "REJECTED", state["final"].reasoning
     assert MUST_REJECT[name] & codes, codes
+    assert state["final"].decided_by == "guardrail" and state.get("approval") is None
 
 
 @pytest.mark.live
