@@ -1,5 +1,6 @@
 import re
-from datetime import date
+import unicodedata
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from dateutil import parser as dateparser
@@ -11,23 +12,31 @@ from invoice_agent.models import ExtractedField, ExtractedInvoice, Invoice, Line
 def parse_date(s: str | None) -> date | None:
     if not s or not s.strip():
         return None
+    if not re.search(r"\d{4}", s):
+        return None
     try:
-        return dateparser.parse(s.strip(), dayfirst=False).date()
+        a = dateparser.parse(s.strip(), dayfirst=False, default=datetime(1900, 1, 1))
+        b = dateparser.parse(s.strip(), dayfirst=False, default=datetime(1901, 2, 2))
     except (ValueError, OverflowError):
         return None
+    # differing results mean a part (year/month/day) was filled from the default
+    if a != b or a.year == 1900:
+        return None
+    return a.date()
 
 
 def parse_money(s: str | None) -> Decimal | None:
     if s is None:
         return None
     cleaned = re.sub(r"[$,\s]", "", s)
-    if not cleaned:
+    m = re.fullmatch(r"-?\d+(\.(\d+))?", cleaned)
+    if not m or len(m.group(2) or "") > 4:
         return None
     try:
         d = Decimal(cleaned)
     except InvalidOperation:
         return None
-    return d if d.is_finite() else None
+    return d if abs(d) < 10**12 else None
 
 
 def normalize_invoice_number(s: str | None) -> str | None:
@@ -105,10 +114,16 @@ def to_invoice(ext: ExtractedInvoice, skus: list[str]) -> tuple[Invoice, list[Un
     items: list[LineItem] = []
     for i, it in enumerate(ext.items):
         p = f"items[{i}]"
-        name = (it.name.value or "").strip()
+        name = unicodedata.normalize("NFKC", (it.name.value or "")).strip()
         sku, suggestion = match_sku(name, skus)
         if it.name.confidence != "high":
             note(f"{p}.name", it.name, sku or name)
+        if sku and re.sub(r"\s", "", name.casefold()) != sku.casefold():
+            removed = " ".join(re.findall(r"\([^)]*\)", name)) or "".join(
+                re.findall(r"[^\w\s]|_", name))
+            unc.append(Uncertainty(field_path=f"{p}.name", raw=it.name.raw or name, normalized=sku,
+                                   confidence="medium",
+                                   reason=f"name normalized to {sku} (removed: '{removed}')"))
         if suggestion:
             unc.append(Uncertainty(field_path=f"{p}.name", raw=it.name.raw, normalized=suggestion,
                                    confidence="low", reason=f"no exact SKU match; closest is {suggestion}"))

@@ -40,3 +40,17 @@ def test_reconcile_line_and_total_messages():
 def test_reconcile_no_subtotal_uses_lines():
     inv = Invoice(items=[L(2, "5.00")], total=D("10.00"))
     assert reconcile(inv) == []
+
+
+def test_reconcile_total_only_is_not_checked():
+    assert reconcile(Invoice(total=D("5000"))) == []
+
+
+def test_reconcile_off_by_one_cent():
+    inv = Invoice(subtotal=D("5000.00"), total=D("5000.01"))
+    assert len(reconcile(inv)) == 1
+
+
+def test_reconcile_does_not_raise_on_huge_values():
+    inv = Invoice(subtotal=D("1E+30"), total=D("5"))
+    assert reconcile(inv) == ["total: value could not be checked"]

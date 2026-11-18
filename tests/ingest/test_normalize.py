@@ -95,3 +95,43 @@ def test_to_invoice_items_and_currency_default():
     assert by["items[0].unit_price"].confidence == "low"
     assert by["items[1].qty"].reason == "could not parse"
     assert by["items[1].name"].confidence == "low" and by["items[1].name"].normalized == "WidgetB"
+
+
+@pytest.mark.parametrize("s", ["1e30", "1E+999999", "1000000000000", "1.23456", "NaN", "Infinity"])
+def test_parse_money_rejects_hostile(s):
+    assert parse_money(s) is None
+
+
+def test_parse_money_negative_and_limits():
+    assert parse_money("-250.00") == Decimal("-250.00")
+    assert parse_money("999999999999.9999") == Decimal("999999999999.9999")
+
+
+@pytest.mark.parametrize("s", ["Jan 2026", "5", "Jan 30"])
+def test_parse_date_requires_full_date(s):
+    assert parse_date(s) is None
+
+
+def _name_unc(name):
+    ext = ExtractedInvoice(currency=F("USD"), items=[
+        ExtractedLineItem(name=F(name), qty=F("1"), unit_price=F("1"))])
+    inv, unc = to_invoice(ext, ["WidgetA"])
+    return inv, [u for u in unc if u.field_path == "items[0].name"]
+
+
+def test_to_invoice_flags_removed_parenthetical():
+    inv, unc = _name_unc("WidgetA (rush order)")
+    assert inv.items[0].sku == "WidgetA"
+    assert len(unc) == 1 and unc[0].confidence == "medium"
+    assert "rush order" in unc[0].reason and unc[0].raw == "WidgetA (rush order)"
+    assert unc[0].normalized == "WidgetA"
+
+
+def test_to_invoice_whitespace_difference_not_flagged():
+    inv, unc = _name_unc("Widget A")
+    assert inv.items[0].sku == "WidgetA" and unc == []
+
+
+def test_to_invoice_nfkc_name():
+    inv, unc = _name_unc("ＷidgetＡ")
+    assert inv.items[0].sku == "WidgetA"

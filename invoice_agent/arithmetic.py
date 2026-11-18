@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from invoice_agent.models import Invoice
 
@@ -11,6 +11,14 @@ def _q(d: Decimal) -> Decimal:
 
 def reconcile(inv: Invoice) -> list[str]:
     msgs: list[str] = []
+    try:
+        _reconcile(inv, msgs)
+    except InvalidOperation:
+        msgs.append("total: value could not be checked")
+    return msgs
+
+
+def _reconcile(inv: Invoice, msgs: list[str]) -> None:
     amounts: list[Decimal] = []
     for i, it in enumerate(inv.items):
         computed = None
@@ -28,7 +36,7 @@ def reconcile(inv: Invoice) -> list[str]:
     lines_sum = sum(amounts, Decimal("0.00"))
     if inv.subtotal is not None and amounts and lines_sum != _q(inv.subtotal):
         msgs.append(f"subtotal: expected {lines_sum} (sum of line amounts), found {_q(inv.subtotal)}")
-    if inv.total is not None:
+    if inv.total is not None and (inv.subtotal is not None or amounts):
         base = _q(inv.subtotal) if inv.subtotal is not None else lines_sum
         tax = _q(inv.tax) if inv.tax is not None else Decimal("0.00")
         ship = _q(inv.shipping) if inv.shipping is not None else Decimal("0.00")
@@ -39,4 +47,3 @@ def reconcile(inv: Invoice) -> list[str]:
                 f"total: expected {expected} ({label} {base} + tax {tax} + shipping {ship}), "
                 f"found {_q(inv.total)}"
             )
-    return msgs
