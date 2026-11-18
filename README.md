@@ -8,8 +8,8 @@ The system takes an invoice in whatever shape it arrives (PDF, text, JSON, CSV, 
 
 Acme loses about **$2M/year** to manual invoice handling: a **30% error rate** and **5-day delays**.
 
-- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **only 5 of 20 needed a person**; the rest were settled with written reasons.
-- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time — **9 of the 20 samples are blocked this way**, and **3 more are recognized as the same invoice sent twice**, so they are never paid twice.
+- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **every one was settled with written reasons in about 5 minutes; none had to wait for a person** (6 paid, 11 rejected, 3 duplicates).
+- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time — **9 of the 20 samples are blocked this way**, **2 more are rejected by the agents** for an unexplained price or currency deviation, and **3 are recognized as the same invoice sent twice**, so they are never paid twice.
 - **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an approved invoice's prices or totals differ from Acme's reference (a rush fee, a discount, a foreign currency). The reviewer sees the original document with the uncertain spots highlighted, the agents' argument, and a plain verdict — not logs.
 - **Every decision is auditable.** Reasoning, flags, the full analyst ⇄ VP exchange and the deciding party are stored per invoice.
 
@@ -49,7 +49,8 @@ Runtime files live in `var/` (gitignored): `var/app.db` (inventory + run history
  extract (INGESTION AGENT) ....................................... Grok agent
    structured output: every field = value + exact source snippet + confidence
    code then normalizes: dates → ISO, money → Decimal, "Widget A" → SKU WidgetA
-   self-check: arithmetic / schema errors are sent back to Grok (≤ 2 retries)
+   self-check: schema errors / empty answers are sent back to Grok (≤ 2 retries);
+   printed amounts are never "corrected" — math that doesn't add up goes to validation
         │
         ▼
  validate ............................................................. code
@@ -106,55 +107,56 @@ Validation produces flags in three severities. The agents see all of them; code 
 | Severity | What it means | Checks |
 |---|---|---|
 | **must_reject** | Never paid on the agents' say-so. If the agents approve anyway, the guardrail forces REJECT. Only a human can override, with a written justification. | quantity exceeds stock (summed across repeated lines of the same item) · item not in inventory · zero-stock / suspicious item · quantity ≤ 0 · negative total · missing vendor or total · missing quantity · no line items · stated total higher than line items + tax + shipping · line total higher than qty × price · invoice number already used with different contents (possible double-billing) |
-| **needs_scrutiny** | The analyst must explain each one in writing; unexplained means REJECT. A price or total deviation also sends an agent APPROVE to a person before payment. | unit price ≠ Acme reference price (any amount, no tolerance) · totals don't reconcile · total over $10K (triggers a 5-point checklist the VP cannot skip) · due date missing or on/before invoice date · non-USD currency · missing unit price · extraction uncertainty |
+| **needs_scrutiny** | The analyst must explain each one in writing; unexplained means REJECT. A price, total or currency deviation (or an amount not printed on the invoice) also sends an agent APPROVE to a person before payment. | unit price ≠ Acme reference price (any amount, no tolerance) · totals don't reconcile · total over $10K (triggers a 5-point checklist the VP cannot skip) · due date missing or on/before invoice date · non-USD currency · missing unit price · an extracted amount that isn't printed anywhere on the invoice · extraction uncertainty |
 | **info** | Context for the agents; decides nothing on its own. | urgency / wire-transfer pressure language · "formerly" vendor rename |
 
 Reference stock and prices (seed data, extended with a `unit_price` column): WidgetA 15 @ $250, WidgetB 10 @ $500, GadgetX 5 @ $750, FakeItem 0.
 
 ## Results on the sample invoices
 
-Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-18):
+Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-17): **6 PAID, 9 blocked by hard rules, 2 rejected by the agents on judgment, 3 DUPLICATE, 0 waiting for a person, 0 ERROR.**
 
 | File | Vendor | Amount | Outcome | Why |
 |---|---|---|---|---|
 | invoice_1001.txt | Widgets Inc. | $5,000.00 | PAID | Clean: stock, prices and math all check out |
-| invoice_1002.txt | Gadgets Co. | $15,000.00 | REJECTED | 20 GadgetX ordered, 5 in stock |
-| invoice_1003.txt | Fraudster LLC | $100,000.00 | REJECTED | FakeItem: zero-stock / suspicious item |
+| invoice_1002.txt | Gadgets Co. | $15,000.00 | REJECTED | 20 GadgetX ordered, 5 in stock (rule) |
+| invoice_1003.txt | Fraudster LLC | $100,000.00 | REJECTED | FakeItem: zero-stock / suspicious item, exceeds stock (rule) |
 | invoice_1004.json | Precision Parts Ltd. | $1,890.00 | PAID | Clean original of INV-1004 |
-| invoice_1004_revised.json | Precision Parts Ltd. | $5,940.00 | REJECTED | INV-1004 reused with different contents (possible double-billing) |
-| invoice_1005.json | Global Supply Chain Partners | $15,225.00 | REJECTED | 8 GadgetX ordered, 5 in stock |
+| invoice_1004_revised.json | Precision Parts Ltd. | $5,940.00 | REJECTED | INV-1004 reused with different contents — possible double-billing (rule) |
+| invoice_1005.json | Global Supply Chain Partners | $15,225.00 | REJECTED | 8 GadgetX ordered, 5 in stock (rule) |
 | invoice_1006.csv | Acme Industrial Supplies | $2,750.00 | PAID | Clean |
-| invoice_1007.csv | MegaWidgets Corp | $15,635.00 | REJECTED | WidgetA and WidgetB exceed stock |
-| invoice_1008.txt | NoProd Industries | $9,900.00 | REJECTED | SuperGizmo / MegaSprocket not in inventory (guardrail; Grok timed out, rules decided) |
-| invoice_1009.json | (missing) | −$250.00 | REJECTED | Missing vendor, negative quantity and total |
-| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | REJECTED | WidgetA at $300 vs $250 reference, unexplained rush fee |
-| invoice_1011.pdf | Summit Manufacturing Co. | $3,000.00 | ERROR | Grok timed out, also on the end-of-batch retry; re-run to finish |
+| invoice_1007.csv | MegaWidgets Corp | $15,525.00 | REJECTED | WidgetA and WidgetB exceed stock (rule); printed total kept as printed, its under-billing flagged |
+| invoice_1008.txt | NoProd Industries | $9,900.00 | REJECTED | SuperGizmo / MegaSprocket not in inventory (rule, enforced by the guardrail) |
+| invoice_1009.json | (missing) | −$250.00 | REJECTED | Missing vendor, negative quantity and total (rule) |
+| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | REJECTED | WidgetA at $300 vs $250 reference, unexplained rush fee (agents) |
+| invoice_1011.pdf | Summit Manufacturing Co. | $3,000.00 | PAID | Clean |
 | invoice_1011.txt | Summit Manufacturing Co. | $3,000.00 | DUPLICATE | Same invoice as the PDF |
 | invoice_1012.pdf | QuickShip Distributers | $9,975.00 | PAID | Clean (vendor-rename note is information only) |
 | invoice_1012.txt | QuickShip Distributers | $9,975.00 | DUPLICATE | Same invoice as the PDF |
-| invoice_1013.json | Atlas Industrial Supply | $22,512.80 | DUPLICATE | Same invoice as the PDF (validated second this run) |
-| invoice_1013.pdf | Atlas Industrial Supply | $22,512.80 | REJECTED | 22 WidgetA, 18 WidgetB, 9 GadgetX ordered — all exceed stock |
-| invoice_1014.xml | TechParts International | $4,125.00 | REJECTED | EUR invoice; prices can't be verified against USD reference |
+| invoice_1013.json | Atlas Industrial Supply | $22,562.80 | REJECTED | 22 WidgetA, 18 WidgetB, 9 GadgetX exceed stock, and the total is $50 more than its lines + tax (rule) |
+| invoice_1013.pdf | Atlas Industrial Supply | $22,562.80 | DUPLICATE | Same invoice as the JSON |
+| invoice_1014.xml | TechParts International | $4,125.00 | REJECTED | EUR invoice at non-reference prices; can't be verified against USD reference (agents) |
 | invoice_1015.csv | Reliable Components Inc. | $6,500.00 | PAID | Clean |
-| invoice_1016.json | Widgets Inc. | $3,233.00 | REJECTED | WidgetC not in inventory |
+| invoice_1016.json | Widgets Inc. | $3,233.00 | REJECTED | WidgetC not in inventory (rule) |
 
-**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **9 min 20 s with 5 workers** on this run. That run also hit a Grok slowdown: two runs timed out and were retried at the end. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't.
+**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **about 5 minutes with 5 workers** on this run, with no Grok timeouts. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't. In this run the agents rejected both price/currency deviations outright, so nothing waited for a person; had they approved either one, the guardrail would have sent it to the review screen instead of paying.
 
 ## Safety and design decisions
 
-- **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total deviation — or a human approves on the review screen.
+- **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total/currency deviation — or a human approves on the review screen.
 - **Never pay twice:** the same invoice in two formats is caught by a content fingerprint and marked DUPLICATE; a reused number with different contents is rejected; re-running a file that was already paid or is awaiting review returns the stored result; a crash after payment is recovered from the checkpoint instead of paying again.
 - **Prompt-injection defenses:** vendor text is fenced as untrusted data in the agents' briefing, the policy lives in the system prompt, and every rule that matters is a code gate the agents cannot argue past.
 - **Fail closed:** missing quantities, prices, vendors or totals, totals too large to verify, and unreadable files all end in REJECT, review or ERROR — never in payment. If the analyst/VP call fails (e.g. a Grok timeout) on an invoice that already broke a hard rule, it is still REJECTED by the guardrail, with a note that the agents' write-up is missing.
 - **Money is `Decimal`, never float:** amounts reconcile to the cent.
-- **Local review screen is guarded:** state-changing requests must come from the screen itself (CSRF origin check) and the server only answers to localhost (trusted-host check against DNS rebinding); uploads are size-limited and file names sanitized.
+- **Printed amounts are copied, never fixed:** the ingestion agent is told to copy every amount exactly as printed, its arithmetic mismatches are not sent back as "fix this", and code checks that every extracted amount actually appears in the source text — so an AI can't quietly change what Acme pays (it once rewrote 1013's total to make the math work).
+- **Local review screen is guarded:** state-changing requests must come from the screen itself (CSRF origin check) and the server only answers to localhost; each web request opens its own SQLite connection (WAL, 5 s busy timeout) (trusted-host check against DNS rebinding); uploads are size-limited and file names sanitized.
 - **Human decisions are final and recorded:** a human approve or reject is never overturned by a re-run, and approving over a hard rule requires a justification that is logged.
 - **Rules are data, not magic:** inventory is static reference data, so outcomes don't depend on processing order (only which copy of a duplicate pair counts as the original can vary); business knobs (3 rounds, $10K threshold, 2 extraction retries) are in `invoice_agent/infra/config.py`.
 
 ## Testing
 
 ```bash
-.venv/bin/pytest                      # offline suite: 227 tests, ~7 s, no network (scripted fake agents)
+.venv/bin/pytest                      # offline suite: 235 tests, ~7 s, no network (scripted fake agents)
 .venv/bin/pytest -m live -v -s        # live tests against real Grok (reads XAI_API_KEY from .env)
 timeout 900 .venv/bin/pytest -m live tests/test_expected_outcomes.py -v -s    # all 20 samples end to end, 5 at a time
 ```
@@ -164,6 +166,7 @@ The offline suite covers reading, normalization, every rulebook check, the guard
 ## Assumptions and limitations
 
 - **Local prototype:** single machine, SQLite, no cloud deployment; payment is the README's mock function.
+- **One processor per file at a time:** don't run CLI batches while the server is processing the same files.
 - **No reviewer login:** the review screen is localhost-only and has no authentication or per-user roles; anyone at the machine can approve.
 - **Currency:** EUR (and any non-USD) amounts are not converted; they are flagged and compared as-is, so such invoices go to a person.
 - **Prices are ground truth:** any deviation from Acme's reference price is scrutinized, even a legitimate discount — the cost is an extra human click on those invoices.

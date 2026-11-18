@@ -33,6 +33,7 @@ NEEDS_SCRUTINY flags: not an automatic reject, but each one must be explicitly e
 - due_date_missing: the due date is missing or unparseable.
 - due_before_or_on_invoice_date: the due date is on or before the invoice date (e.g. "yesterday").
 - non_usd_currency: the invoice is not in USD, so amounts cannot be compared to USD reference prices.
+- amount_not_in_source: an extracted amount does not appear anywhere in the invoice text, so it may have been misread or altered; a person must confirm before paying.
 - missing_unit_price: a line has no unit price, so it cannot be price-checked.
 - extraction_issue: the reader was unsure about a field or had to guess; treat the value with caution.
 

@@ -2,6 +2,7 @@
 Used by validate (stock/price/duplicate checks), pay, and the review screen (which also tracks live run stages here).
 """
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -40,6 +41,16 @@ def connect(path: Path) -> sqlite3.Connection:
     # check_same_thread=False: LangChain runs agent tools (get_inventory, ...) on worker threads.
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Web requests, batch workers and the decision path each hold their own connection to the same file:
+    # wait up to 5 s for another writer instead of failing, and let readers proceed while one writes (WAL).
+    conn.execute("PRAGMA busy_timeout=5000")
+    # WAL is stored in the file, so only the first connection has to switch; switching needs a moment alone
+    # with the file, so when parallel workers open at once the one that loses the race leaves it to the winner.
+    if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
     return conn
 
 
@@ -202,6 +213,9 @@ def find_run_by_content_hash(conn: sqlite3.Connection, content_hash: str) -> dic
 
 
 def reset(settings: Settings) -> None:
-    """Delete the app and checkpoint databases for a clean start."""
-    settings.app_db.unlink(missing_ok=True)
-    settings.checkpoint_db.unlink(missing_ok=True)
+    """Delete the app and checkpoint databases (with their WAL sidecars) and uploaded files for a clean start."""
+    for path in (settings.app_db, settings.checkpoint_db):
+        # WAL mode keeps recent writes in -wal/-shm files; a stale -wal next to a fresh db would replay old rows.
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
+    shutil.rmtree(settings.var_dir / "uploads", ignore_errors=True)

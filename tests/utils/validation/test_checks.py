@@ -1,13 +1,14 @@
 """Tests for the validation rulebook against invoices mirroring the sample files in data/invoices/."""
 from datetime import date
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 
 from invoice_agent.infra import db
 from invoice_agent.infra.db import connect, init_db, save_run
 from invoice_agent.models import Invoice, LineItem
-from invoice_agent.utils.validation.checks import check_dates
+from invoice_agent.utils.validation.checks import check_amounts_in_source, check_dates
 from invoice_agent.utils.validation.validate import claim_identity, find_duplicate, fingerprint, run_validation
 
 
@@ -41,7 +42,8 @@ def codes(flags, severity=None):
 
 def test_1001_clean_has_no_blocking_flags(conn):
     """A clean invoice yields no must_reject or needs_scrutiny flags."""
-    flags = run_validation(conn, inv_1001(), "INVOICE ...", [])
+    raw = (Path(__file__).parents[3] / "data" / "invoices" / "invoice_1001.txt").read_text()
+    flags = run_validation(conn, inv_1001(), raw, [])
     assert not [f for f in flags if f.severity != "info"]
 
 
@@ -338,3 +340,38 @@ def test_claim_identity_records_pending_row(conn):
     assert first.duplicate_of is None and second.duplicate_of == "r1"
     row = db.get_run(conn, "r1")
     assert (row["invoice_number"], row["fingerprint"], row["content_hash"]) == ("INV-1011", fingerprint(inv), "hash-pdf")
+
+
+RAW_1013 = (Path(__file__).parents[3] / "data" / "invoices" / "invoice_1013.json").read_text()
+RAW_1007 = (Path(__file__).parents[3] / "data" / "invoices" / "invoice_1007.csv").read_text()
+
+
+def test_1013_rewritten_total_is_not_in_source(conn):
+    """A reader that "fixed" 1013's total to 22512.80 is caught: that amount is printed nowhere in the file."""
+    flags = run_validation(conn, inv_1013(total=D("22512.80")), RAW_1013, [])
+    hit = [f for f in flags if f.code == "amount_not_in_source"]
+    assert [f.field_path for f in hit] == ["total"] and hit[0].severity == "needs_scrutiny"
+
+
+def test_1013_printed_total_keeps_overbilling_gate(conn):
+    """1013 read as printed (22562.80) has every amount in the source and still trips total_exceeds_line_items."""
+    flags = run_validation(conn, inv_1013(), RAW_1013, [])
+    assert "amount_not_in_source" not in codes(flags)
+    assert "total_exceeds_line_items" in codes(flags, "must_reject")
+
+
+def test_1007_rewritten_total_is_not_in_source(conn):
+    """A reader that "fixed" 1007's under-billed total to 15635.00 is caught; the printed 15525.00 is not."""
+    assert "amount_not_in_source" in codes(run_validation(conn, inv_1007(total=D("15635.00")), RAW_1007, []))
+    assert "amount_not_in_source" not in codes(run_validation(conn, inv_1007(), RAW_1007, []))
+
+
+def test_amounts_in_source_accepts_lookalike_repair_and_derived_lines():
+    """$3,500.O0 (1012's OCR typo) counts as 3500.00; an unprinted line total equal to qty x price is not flagged."""
+    raw = "WidgetB 7 $500 $3,500.O0\nTOTAL: $3,500.O0"
+    items = [LineItem(name_raw="WidgetB", sku="WidgetB", qty=D("7"), unit_price=D("500"), line_total=D("3500.00"))]
+    assert check_amounts_in_source(Invoice(items=items, total=D("3500.00"), tax=D("0")), raw) == []
+    # A unit price that is not printed is flagged at its line.
+    items[0] = items[0].model_copy(update={"unit_price": D("510")})
+    assert [f.field_path for f in check_amounts_in_source(Invoice(items=items, total=D("3500.00")), raw)] == [
+        "items[0].unit_price"]

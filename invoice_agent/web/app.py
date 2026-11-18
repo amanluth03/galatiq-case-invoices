@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +27,7 @@ from invoice_agent.infra.config import Settings
 from invoice_agent.infra.logging_setup import RUN_LOGGER
 from invoice_agent.models import FinalOutcome, Flag, PipelineState, Uncertainty
 from invoice_agent.runner import (
-    build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
+    _paid_checkpoint, build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
 )
 from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
@@ -88,6 +88,7 @@ FLAG_TITLES = {
     "arithmetic_mismatch": "Numbers don't reconcile", "over_10k": "Over $10,000 — extra checks required",
     "due_date_missing": "Due date missing", "due_before_or_on_invoice_date": "Due on or before the invoice date",
     "non_usd_currency": "Not in US dollars", "missing_unit_price": "Unit price missing",
+    "amount_not_in_source": "Amount not found on the invoice",
     "extraction_issue": "The reader was unsure", "urgency_language": "Payment-pressure language",
     "vendor_name_change": "Vendor name changed",
 }
@@ -247,7 +248,7 @@ def verdict(state: PipelineState) -> str:
     if final.status == "NEEDS_HUMAN_REVIEW":
         # The guardrail's hold overwrites approval.reasoning; recognise it to explain why a person is needed.
         if final.reasoning == HUMAN_CONFIRMATION_REASON:
-            return "Agents approved, but prices or totals differ from our records — please confirm"
+            return "Agents approved, but prices, totals or currency differ from our records — please confirm"
         rounds = len(approval.rounds) if approval else 0
         return f"Agents couldn't agree after {rounds} round{'s' if rounds != 1 else ''} — your call"
     if final.status == "REJECTED":
@@ -481,8 +482,11 @@ def run_jobs(jobs: list[tuple[str, Path, str]], runtime_factory: Callable[[], tu
 def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                runtime_factory: Callable[[], tuple[Deps, object]] | None = None) -> FastAPI:
     """Build the review-screen app over a runtime (real or fake deps/graph) and the app database connection.
-    settings: where uploads and the app db live; runtime_factory: builds a fresh runtime for each background job."""
+    settings: where uploads and the app db live; runtime_factory: builds a fresh runtime for each background job.
+    conn is used only at startup and (as deps.conn) for decisions under the lock; each request opens its own."""
     settings = settings or Settings()
+    # The file behind conn: routes run on a threadpool, and one sqlite3 connection shared across threads is unsafe.
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()["file"])
     runtime_factory = runtime_factory or (lambda: build_runtime(settings))
     uploads = settings.var_dir / "uploads"
     app = FastAPI(title="Invoice review", docs_url=None, redoc_url=None, openapi_url=None)
@@ -502,6 +506,14 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if row["status"] == "PROCESSING":
             _save_error(conn, row["run_id"], row["source_path"], INTERRUPTED_REASON, row["content_hash"])
 
+    def request_conn():
+        """FastAPI dependency: a fresh connection to the app database for this request, closed when it ends."""
+        c = db.connect(db_path)
+        try:
+            yield c
+        finally:
+            c.close()
+
     def start_jobs(jobs: list[tuple[str, Path, str]], workers: int = 1) -> None:
         """Process (run_id, file, content hash) jobs, `workers` at a time, from a new daemon thread."""
         thread = threading.Thread(target=run_jobs, args=(jobs, runtime_factory, settings.app_db, workers), daemon=True)
@@ -509,7 +521,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         app.state.jobs = [t for t in app.state.jobs if t.is_alive()] + [thread]
         thread.start()
 
-    def claim(content_hash: str) -> tuple[str, bool]:
+    def claim(conn: sqlite3.Connection, content_hash: str) -> tuple[str, bool]:
         """The run id for a file's contents and whether it needs processing (False: open the existing run instead)."""
         existing = db.find_run_by_content_hash(conn, content_hash)
         # Same re-run policy as the CLI: never re-run a paid, paused or human-decided invoice, or one in progress.
@@ -534,7 +546,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         context = {"inv": detail_view(row), "error": None, "notice": None, "form": {}, **extra}
         return render(request, "detail.html", context, status_code)
 
-    def not_found(request: Request) -> HTMLResponse:
+    def not_found(request: Request, conn: sqlite3.Connection) -> HTMLResponse:
         """A friendly 404 page for an unknown run id."""
         return render(request, "queue.html", {"missing": True, **queue_view(db.list_runs(conn))}, 404)
 
@@ -554,16 +566,17 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
-    def queue(request: Request):
+    def queue(request: Request, conn: sqlite3.Connection = Depends(request_conn)):
         """The invoice queue: dollar totals, then every run with those awaiting review first."""
         return render(request, "queue.html", {"missing": False, **queue_view(db.list_runs(conn))})
 
     @app.get("/invoices/{run_id}", response_class=HTMLResponse)
-    def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0):
+    def detail(request: Request, run_id: str, decided: int = 0, seen: int = 0,
+               conn: sqlite3.Connection = Depends(request_conn)):
         """One invoice: verdict, source document, extracted fields, flags, agent reasoning, decision panel."""
         row = db.get_run(conn, run_id)
         if row is None:
-            return not_found(request)
+            return not_found(request, conn)
         notice = None
         if decided:
             notice = "Your decision has been recorded."
@@ -574,7 +587,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return render_detail(request, row, notice=notice)
 
     @app.get("/invoices/{run_id}/status")
-    def status(run_id: str):
+    def status(run_id: str, conn: sqlite3.Connection = Depends(request_conn)):
         """Where a run is now, for live.js: status, last finished stage and, while processing, the step in progress."""
         row = db.get_run(conn, run_id)
         if row is None:
@@ -585,7 +598,8 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 "label": stage_label(row["stage"]) if processing else STATUS_LABELS.get(row["status"])}
 
     @app.post("/upload", response_class=HTMLResponse)
-    def upload(request: Request, file: UploadFile | None = File(None)):
+    def upload(request: Request, file: UploadFile | None = File(None),
+               conn: sqlite3.Connection = Depends(request_conn)):
         """Save an uploaded invoice, mark it PROCESSING, start it in the background and open its live page."""
         if file is None or not file.filename:
             return refuse(request, 400, "No file chosen", "Choose an invoice file to upload, then try again.")
@@ -603,7 +617,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
             return refuse(request, 413, "File too large", TOO_LARGE_MESSAGE)
         digest = hashlib.sha256(content).hexdigest()  # the same content hash the reader computes
         with intake_lock:
-            run_id, needed = claim(digest)
+            run_id, needed = claim(conn, digest)
             if not needed:
                 return RedirectResponse(f"/invoices/{run_id}?seen=1", status_code=303)
             dest = uploads / f"{run_id}_{name}"
@@ -617,13 +631,13 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         return RedirectResponse(f"/invoices/{run_id}", status_code=303)
 
     @app.post("/process-samples")
-    def process_samples():
+    def process_samples(conn: sqlite3.Connection = Depends(request_conn)):
         """Queue every sample invoice not already settled and process them in the background, several at a time."""
         jobs = []
         with intake_lock:
             for path in invoice_files(SAMPLES_DIR):
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                run_id, needed = claim(digest)
+                run_id, needed = claim(conn, digest)
                 if not needed:
                     continue
                 db.create_pending_run(conn, run_id, str(path), digest)
@@ -636,13 +650,13 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
 
     @app.post("/invoices/{run_id}/decision", response_class=HTMLResponse)
     def decide(request: Request, run_id: str, decision: str = Form(""), note: str = Form(""),
-               justification: str = Form("")):
+               justification: str = Form(""), conn: sqlite3.Connection = Depends(request_conn)):
         """Apply a reviewer's Approve/Reject to a paused run, then redirect back to its detail page."""
         form = {"note": note, "justification": justification}
         with decision_lock:
             row = db.get_run(conn, run_id)
             if row is None:
-                return not_found(request)
+                return not_found(request, conn)
             if row["status"] != "NEEDS_HUMAN_REVIEW":
                 label = STATUS_LABELS.get(row["status"], row["status"]).lower()
                 return render_detail(request, row, 409,
@@ -654,7 +668,15 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                        "write why paying is right despite them. It goes on the audit record.")
             if decision == "APPROVE" and has_blocking and not justification.strip():
                 return render_detail(request, row, 400, error=message, form=form)
+            # A crash after paying but before saving leaves the row paused while the checkpoint says PAID:
+            # record that result and show it, never resume (and pay) the run a second time.
+            paid = _paid_checkpoint(graph, run_id)
+            if paid is not None:
+                db.save_run(deps.conn, paid)
+                return render_detail(request, db.get_run(conn, run_id) or row, 409,
+                                     notice="This invoice had already been paid, so it wasn't paid again.")
             try:
+                # deps.conn (not this request's connection): the graph's own writes go through it, one decision at a time.
                 resume_review(run_id, decision, note.strip(), justification.strip() or None, deps, graph)
             except ValueError as exc:
                 # Defence in depth: the graph's own resume schema also refuses an unjustified approval.
@@ -666,7 +688,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 log.exception("decision failed", extra={"fields": {"run_id": run_id}})
                 return render_detail(request, db.get_run(conn, run_id) or row, 500, form=form, notice=(
                     "We couldn't record that decision — the run's saved progress is missing or damaged. "
-                    "Nothing was paid."))
+                    "Check the queue before trying again."))
         return RedirectResponse(f"/invoices/{run_id}?decided=1", status_code=303)
 
     return app

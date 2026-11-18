@@ -36,7 +36,7 @@ def test_policy_mentions_every_flag_code_and_checklist_key():
     """The policy text the agents read covers every rulebook code and checklist key."""
     codes = """exceeds_stock unknown_item zero_stock_item non_positive_quantity negative_total missing_vendor
     missing_total missing_quantity no_line_items invoice_number_reused total_exceeds_line_items line_total_exceeds_price total_unverifiable price_mismatch arithmetic_mismatch over_10k
-    due_date_missing due_before_or_on_invoice_date non_usd_currency missing_unit_price extraction_issue
+    due_date_missing due_before_or_on_invoice_date non_usd_currency missing_unit_price extraction_issue amount_not_in_source
     urgency_language vendor_name_change""".split()
     for code in codes + list(CHECKLIST_KEYS):
         assert code in APPROVAL_POLICY
@@ -56,6 +56,14 @@ def test_calculate(conn):
     assert calc.invoke({"expression": "__import__('os')"}).startswith("error")
     assert calc.invoke({"expression": "1/0"}).startswith("error")
     assert calc.invoke({"expression": "2**3"}).startswith("error")
+
+
+def test_calculate_rejects_non_finite_and_deep_expressions(conn):
+    """Infinity and absurdly nested expressions come back as an error string, never a crash."""
+    calc = make_tools(conn)["calculate"]
+    assert calc.invoke({"expression": "1e999"}).startswith("error")
+    # 3000 nested minus signs parse fine but overflow the evaluator's recursion.
+    assert calc.invoke({"expression": "-" * 3000 + "1"}).startswith("error")
 
 
 def test_get_inventory_tool(conn):

@@ -189,7 +189,7 @@ def process_file(path: Path, deps: Deps, graph, run_id: str | None = None,
 
 def invoice_files(dir: Path) -> list[Path]:
     """Every supported invoice file in a directory, in filename order."""
-    # Sorted so invoice_1004.json is saved before invoice_1004_revised.json is checked against it.
+    # Sorted only so output comes in a stable filename order; duplicate detection doesn't depend on it (workers run in parallel).
     return sorted(p for p in Path(dir).iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
 
 

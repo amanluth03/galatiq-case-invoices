@@ -90,5 +90,6 @@ def run_validation(conn: sqlite3.Connection, inv: Invoice, raw_text: str, extrac
     flags += checks.check_currency(inv)
     flags += checks.check_amount(inv)
     flags += checks.check_red_flags(inv, raw_text)
+    flags += checks.check_amounts_in_source(inv, raw_text)
     flags += [Flag(severity="needs_scrutiny", code="extraction_issue", message=m) for m in extraction_issues]
     return flags

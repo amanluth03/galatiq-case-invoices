@@ -1,4 +1,4 @@
-"""Tests for the guardrail rules: must_reject blocks an agent APPROVE; price/total deviations need a human to confirm."""
+"""Tests for the guardrail rules: must_reject blocks an agent APPROVE; price/total/currency deviations need a human to confirm."""
 from invoice_agent.models import Flag
 from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON, apply_guardrail, needs_human_confirmation
 
@@ -22,11 +22,11 @@ def test_must_reject_forces_rejection_with_messages():
 
 
 def test_price_or_arithmetic_mismatch_needs_human_confirmation():
-    """A price_mismatch or arithmetic_mismatch flag means an agent APPROVE must be confirmed by a person."""
-    for code in ("price_mismatch", "arithmetic_mismatch"):
+    """A price, arithmetic, unprinted-amount or non-USD flag means an agent APPROVE must be confirmed by a person."""
+    for code in ("price_mismatch", "arithmetic_mismatch", "amount_not_in_source", "non_usd_currency"):
         assert needs_human_confirmation([flag("needs_scrutiny", "x", code)]) == HUMAN_CONFIRMATION_REASON
     assert HUMAN_CONFIRMATION_REASON == (
-        "Agents approved, but the invoice's prices or totals differ from Acme's records — a person must confirm"
+        "Agents approved, but the invoice's prices, totals or currency differ from Acme's records — a person must confirm"
     )
 
 

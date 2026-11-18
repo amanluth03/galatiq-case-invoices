@@ -182,6 +182,51 @@ def check_amount(inv: Invoice) -> list[Flag]:
     return []
 
 
+# A number as printed: optional minus and $, digits with thousands commas, optional decimals.
+_NUMBER = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?")
+# A run that starts like a number and may hold OCR look-alikes, e.g. "$3,500.O0" in sample 1012.
+_DIGIT_RUN = re.compile(r"[\d$][\dOl,.]*")
+
+
+def _source_amounts(raw_text: str) -> set[Decimal]:
+    """Every number printed in the raw text, to the cent; O->0 and l->1 inside digit runs count as their repair."""
+    repaired = _DIGIT_RUN.sub(lambda m: m.group().replace("O", "0").replace("l", "1"), raw_text)
+    found = set()
+    # Read commas both ways: as thousands separators ("$1,500.00") and as CSV column breaks ("WidgetB,15,500.00").
+    for token in _NUMBER.findall(repaired) + _NUMBER.findall(repaired.replace(",", " ")):
+        try:
+            found.add(Decimal(token.replace("$", "").replace(",", "")).quantize(Decimal("0.01")))
+        except InvalidOperation:
+            continue
+    return found
+
+
+def check_amounts_in_source(inv: Invoice, raw_text: str) -> list[Flag]:
+    """Scrutinize any extracted amount that is not printed in the source text (the reader must never rewrite one).
+    Catches an LLM "fixing" a vendor's total so the math works (1013 22562.80 -> 22512.80, 1007 15525 -> 15635)."""
+    printed = _source_amounts(raw_text)
+    fields = [(name, getattr(inv, name)) for name in ("subtotal", "tax", "shipping", "total")]
+    for i, it in enumerate(inv.items):
+        fields.append((f"items[{i}].unit_price", it.unit_price))
+        # A line total the vendor didn't print but that is exactly qty x unit price is derived, not rewritten.
+        derived = it.qty is not None and it.unit_price is not None and it.line_total == it.qty * it.unit_price
+        if not derived:
+            fields.append((f"items[{i}].line_total", it.line_total))
+    flags = []
+    for path, value in fields:
+        # Missing amounts are other checks' job; a zero tax/shipping that isn't printed cannot raise the payment.
+        if value is None or value == 0:
+            continue
+        try:
+            in_source = value.quantize(Decimal("0.01")) in printed
+        except InvalidOperation:
+            in_source = False
+        if not in_source:
+            flags.append(Flag(severity="needs_scrutiny", code="amount_not_in_source", field_path=path,
+                              message=f"{path}: {value} does not appear anywhere in the source document"))
+    return flags
+
+
 def check_red_flags(inv: Invoice, raw_text: str) -> list[Flag]:
     """Info-only fraud hints from the raw text: pressure language and vendor renames."""
     text = raw_text.lower()

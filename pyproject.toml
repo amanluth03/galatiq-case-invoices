@@ -29,6 +29,10 @@ dev = ["pytest", "httpx"]
 [tool.setuptools.packages.find]
 include = ["invoice_agent*"]
 
+# The review screen's HTML templates and static files ship with the package, so a non-editable install works too.
+[tool.setuptools.package-data]
+"invoice_agent.web" = ["templates/*", "static/*"]
+
 [tool.pytest.ini_options]
 markers = ["live: calls the real xAI API"]
 addopts = "-m 'not live'"

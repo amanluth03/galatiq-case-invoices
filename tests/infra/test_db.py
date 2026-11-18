@@ -77,13 +77,24 @@ def test_find_run_by_content_hash(tmp_path):
 
 
 def test_reset_deletes_db_files(tmp_path):
-    """reset removes both DB files and tolerates already-missing files."""
+    """reset removes both DB files, their -wal/-shm sidecars and uploads, and tolerates already-missing files."""
     s = Settings(var_dir=tmp_path)
-    s.app_db.write_text("x")
-    s.checkpoint_db.write_text("y")
+    files = [s.app_db, s.checkpoint_db] + [p.with_name(p.name + x) for p in (s.app_db, s.checkpoint_db)
+                                           for x in ("-wal", "-shm")]
+    for f in files:
+        f.write_text("x")
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "uploads" / "a_invoice.txt").write_text("x")
     db.reset(s)
-    assert not s.app_db.exists() and not s.checkpoint_db.exists()
+    assert not any(f.exists() for f in files) and not (tmp_path / "uploads").exists()
     db.reset(s)
+
+
+def test_connect_uses_wal_and_busy_timeout(tmp_path):
+    """Connections wait for a busy writer (5 s) and use WAL so web requests and workers can share the file."""
+    conn = _conn(tmp_path)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
 
 
 def test_connection_usable_from_worker_thread(tmp_path):

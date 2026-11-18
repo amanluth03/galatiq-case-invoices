@@ -165,3 +165,26 @@ def test_decision_with_broken_checkpoint_shows_plain_500(conn):
     resp = client.post("/invoices/r1/decision", data={"decision": "REJECT", "note": "keep me"})
     assert resp.status_code == 500 and "saved progress is missing or damaged" in resp.text
     assert "checkpoint gone" not in resp.text and "keep me" in resp.text and not pay.calls
+
+
+def test_decision_on_already_paid_checkpoint_does_not_resume(conn):
+    """A run whose checkpoint already ended PAID (crash before the final save) is shown as paid, never paid again."""
+    client, deps, graph, pay = client_for(conn, [make_extracted()])
+    state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
+    assert state["final"].status == "PAID" and len(pay.calls) == 1
+    # The row still looks paused, as if the save after payment never happened.
+    seed(conn, state["run_id"], "NEEDS_HUMAN_REVIEW", "INV-1001", "5000.00")
+    resp = client.post(f"/invoices/{state['run_id']}/decision", data={"decision": "APPROVE", "note": ""})
+    assert "already been paid" in resp.text and len(pay.calls) == 1
+    assert db.get_run(conn, state["run_id"])["status"] == "PAID"
+
+
+def test_concurrent_status_requests_do_not_error(conn):
+    """Many /status polls from parallel threads (live.js on several tabs) all succeed: each request has its own connection."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    seed(conn, "r1", "PAID", "INV-1", "100.00")
+    client, *_ = client_for(conn, [])
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(pool.map(lambda _: client.get("/invoices/r1/status").status_code, range(64)))
+    assert codes == [200] * 64

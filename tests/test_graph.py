@@ -353,7 +353,7 @@ def test_agent_approval_over_price_mismatch_goes_to_human(conn):
     assert "price_mismatch" in {f.code for f in out["flags"]}
     assert "__interrupt__" in out and out.get("final") is None
     assert out["approval"].decision == "NEEDS_HUMAN_REVIEW"
-    assert out["approval"].reasoning.startswith("Agents approved, but the invoice's prices or totals differ")
+    assert out["approval"].reasoning.startswith("Agents approved, but the invoice's prices, totals or currency differ")
     assert len(pay.calls) == 0
     # The human's APPROVE is final: it pays, exactly once.
     done = graph.invoke(Command(resume={"decision": "APPROVE", "note": "rate agreed", "justification": None}), config)
@@ -366,7 +366,10 @@ def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path
     """An over-$10K invoice at reference prices with urgency wording is paid on the agents' APPROVE."""
     # The urgency flag comes from the raw text, so the file says it; the scripted extraction supplies the fields.
     source = tmp_path / "urgent.txt"
-    source.write_text("Widgets Inc. invoice — URGENT, please pay immediately")
+    # Amounts are printed too, so the amount-in-source check sees every extracted figure in the file.
+    source.write_text("Widgets Inc. invoice — URGENT, please pay immediately\n"
+                      "WidgetA 15 $250.00 $3,750.00\nWidgetB 10 $500.00 $5,000.00\nGadgetX 5 $750.00 $3,750.00\n"
+                      "Subtotal $12,500.00\nTotal $12,500.00")
     ex = ScriptedIngestionAgent([make_extracted(
         subtotal="12500.00", total="12500.00",
         items=[ExtractedLineItem(name=_f("WidgetA"), qty=_f("15"), unit_price=_f("250.00"), line_total=_f("3750.00")),

@@ -82,7 +82,7 @@ def serve(port: int) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     setup_logging(settings.log_dir)
-    console.print(f"Review screen → http://localhost:{port}")
+    console.print(f"Review screen → http://127.0.0.1:{port}")
     # settings: uploads and every background job's own runtime use the same var/ files as the server.
     uvicorn.run(create_app(deps, graph, deps.conn, settings=settings), host="127.0.0.1", port=port)
     return 0
@@ -125,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(settings.log_dir)
 
     if args.invoice_path:
-        states = [process_file(Path(args.invoice_path), deps, graph)]
+        try:
+            states = [process_file(Path(args.invoice_path), deps, graph)]
+        finally:
+            # Close the SQLite connections even if processing blows up, so no -wal file is left mid-write.
+            close_runtime(deps, graph)
         show_panel(states[0])
     else:
         # The runtime above only proved the key works: each batch worker builds its own (SQLite is per thread).
@@ -137,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"{batch.retried} run(s) timed out on Grok and were retried once at the end")
     paused = sum(1 for s in states if s["final"].status == "NEEDS_HUMAN_REVIEW")
     if paused:
-        console.print(f"{paused} need human review → open http://localhost:{args.port}")
+        console.print(f"{paused} need human review → open http://127.0.0.1:{args.port}")
     return 0
 
 

@@ -4,7 +4,7 @@ import json
 import operator
 import sqlite3
 import threading
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from langchain_core.tools import BaseTool, tool
 
@@ -73,8 +73,12 @@ def make_tools(conn: sqlite3.Connection) -> dict[str, BaseTool]:
         """Evaluate an arithmetic expression using + - * / and parentheses with decimal numbers, e.g. "15*250 + 5*240". Returns the result, or an error message."""
         try:
             result = _eval(ast.parse(expression.strip(), mode="eval"))
+            # A float literal like 1e999 becomes Infinity; never hand the agent a non-number as a result.
+            if not result.is_finite():
+                return "error: result is not a finite number"
             return format(result.normalize(), "f")
-        except (ValueError, SyntaxError, ZeroDivisionError, InvalidOperation) as e:
+        # ArithmeticError covers division by zero and Decimal overflow; RecursionError a deeply nested expression.
+        except (ValueError, SyntaxError, ArithmeticError, RecursionError) as e:
             return f"error: {e}"
 
     return {t.name: t for t in (get_inventory, get_invoice_history, get_approval_policy, calculate)}

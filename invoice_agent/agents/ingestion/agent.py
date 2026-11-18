@@ -1,5 +1,7 @@
-"""Ingestion agent stage: asks an LLM for structured fields, then self-corrects using code checks.
+"""Ingestion agent stage: asks an LLM for structured fields, retrying only when the answer is unusable.
 Sits after read and before validate; make_ingestion_agent builds the real Grok IngestionAgent, tests plug in fakes.
+Printed amounts that don't add up are never sent back as "fix this": they may be the vendor's own error, so they
+go to validation as issues instead (asking the model to fix them made it rewrite 1013's and 1007's totals).
 """
 from typing import Callable
 
@@ -36,7 +38,8 @@ def run_extraction(
     skus: list[str],
     max_retries: int = MAX_EXTRACTION_RETRIES,
 ) -> ExtractionResult:
-    """Run the ingestion agent, feeding schema/arithmetic errors back for up to max_retries corrections."""
+    """Run the ingestion agent, retrying schema errors and empty answers up to max_retries times.
+    Arithmetic mismatches are returned as issues (never retried), so the vendor's printed amounts stay as printed."""
     errors: list[str] = []
     last: tuple[Invoice, list[Uncertainty], list[str]] | None = None
     attempts = 0
@@ -54,11 +57,10 @@ def run_extraction(
         except Exception as exc:
             errors = [str(exc)]
             continue
-        errors = reconcile(invoice)
-        # An empty answer passes arithmetic trivially (nothing to add up), so it needs its own check.
-        if not invoice.items:
-            errors = [NO_ITEMS_ERROR, *errors]
-        last = (invoice, uncertainties, errors)
+        # Only an empty answer is retried; it passes arithmetic trivially (nothing to add up), so it needs its own check.
+        errors = [NO_ITEMS_ERROR] if not invoice.items else []
+        # Mismatches in the printed amounts are reported, not corrected: validation flags them for a person.
+        last = (invoice, uncertainties, errors + reconcile(invoice))
         if not errors:
             break
     if last is None:
@@ -77,9 +79,10 @@ def make_ingestion_agent(model) -> IngestionAgent:
         """Send the prompt and raw text (plus a correction request on retries) and return the parsed extraction."""
         messages = [("system", INGESTION_PROMPT), ("user", raw_text)]
         if errors:
-            # Self-correction: tell the model exactly which checks its last answer failed.
+            # Self-correction for unusable answers only (schema errors, no line items) — never for arithmetic.
             listed = "\n".join(f"- {e}" for e in errors)
-            messages.append(("user", f"Your previous attempt had these problems. Re-read the text and fix them:\n{listed}"))
+            messages.append(("user", "Your previous attempt had these problems. Re-read the text and fix them, "
+                             f"copying every amount exactly as printed:\n{listed}"))
         return structured.invoke(messages)
 
     return extract

@@ -18,6 +18,7 @@ from invoice_agent.agents.approval.policy import CHECKLIST_KEYS
 from invoice_agent.graph import Deps, build_graph, make_serializer
 from invoice_agent.infra import db
 from invoice_agent.infra.logging_setup import setup_logging
+from invoice_agent.models import ExtractedLineItem
 from invoice_agent.runner import process_dir, process_file, resume_review
 from tests.fakes import (
     _f, ScriptedAnalyst, ScriptedIngestionAgent, ScriptedVP, make_extracted, make_recommendation, make_review,
@@ -122,13 +123,34 @@ class KeyedIngestion:
         return response
 
 
+# make_extracted()'s amounts as printed, so the amount-in-source check finds every figure in a synthetic file.
+AMOUNTS_1001 = "\nWidgetA 10 $250.00 $2,500.00\nWidgetB 5 $500.00 $2,500.00\nTotal $5,000.00"
+
+
 def write_files(tmp_path, contents: dict[str, str]):
-    """Write small invoice text files (name -> text) into a fresh directory and return it."""
+    """Write small invoice text files (name -> text, plus 1001's printed amounts) into a fresh directory and return it."""
     d = tmp_path / "in"
     d.mkdir()
     for name, text in contents.items():
-        (d / name).write_text(text)
+        (d / name).write_text(text + AMOUNTS_1001)
     return d
+
+
+def extracted_1011():
+    """Sample 1011 as printed in both its .txt and .pdf: 6 WidgetA + 3 WidgetB, total $3,000.00."""
+    return make_extracted(invoice_number="INV-1011", subtotal="3000.00", total="3000.00", items=[
+        ExtractedLineItem(name=_f("WidgetA"), qty=_f("6"), unit_price=_f("250.00"), line_total=_f("1500.00")),
+        ExtractedLineItem(name=_f("WidgetB"), qty=_f("3"), unit_price=_f("500.00"), line_total=_f("1500.00"))])
+
+
+def extracted_1004(revised: bool = False):
+    """Sample 1004 as printed (total $1,890.00), or its revision with 5 GadgetX added (total $5,940.00)."""
+    items = [ExtractedLineItem(name=_f("WidgetA"), qty=_f("3"), unit_price=_f("250.00")),
+             ExtractedLineItem(name=_f("WidgetB"), qty=_f("2"), unit_price=_f("500.00"))]
+    if not revised:
+        return make_extracted(invoice_number="INV-1004", subtotal="1750.00", tax="140.00", total="1890.00", items=items)
+    items.append(ExtractedLineItem(name=_f("GadgetX"), qty=_f("5"), unit_price=_f("750.00")))
+    return make_extracted(invoice_number="INV-1004", subtotal="5500.00", tax="440.00", total="5940.00", items=items)
 
 
 def copy_invoices(tmp_path, *names):
@@ -148,7 +170,7 @@ def statuses(states):
 def test_same_invoice_two_formats_in_batch(conn, tmp_path):
     """1011 as txt and as pdf extract to the same invoice: the first is PAID, the second DUPLICATE, paid once."""
     d = copy_invoices(tmp_path, "invoice_1011.txt", "invoice_1011.pdf")
-    factory, pay = build_factory(tmp_path, ScriptedIngestionAgent([make_extracted()] * 2))
+    factory, pay = build_factory(tmp_path, ScriptedIngestionAgent([extracted_1011()] * 2))
     # Sorted by filename, so the .pdf is processed before the .txt; either way one pays and one is a duplicate.
     assert sorted(statuses(process_dir(d, factory).states)) == ["DUPLICATE", "PAID"]
     assert len(pay.calls) == 1
@@ -157,7 +179,7 @@ def test_same_invoice_two_formats_in_batch(conn, tmp_path):
 def test_rerun_same_dir_does_not_self_duplicate(conn, tmp_path):
     """Running the same directory twice gives the same statuses and adds no run rows."""
     d = copy_invoices(tmp_path, "invoice_1011.txt", "invoice_1011.pdf")
-    factory, pay = build_factory(tmp_path, ScriptedIngestionAgent([make_extracted()] * 4))
+    factory, pay = build_factory(tmp_path, ScriptedIngestionAgent([extracted_1011()] * 4))
     first = statuses(process_dir(d, factory).states)
     count = len(db.list_runs(conn))
     assert statuses(process_dir(d, factory).states) == first
@@ -168,9 +190,7 @@ def test_rerun_same_dir_does_not_self_duplicate(conn, tmp_path):
 def test_revised_invoice_rejected(conn, tmp_path):
     """1004 then 1004_revised (same invoice number, new contents): the second is REJECTED with invoice_number_reused."""
     d = copy_invoices(tmp_path, "invoice_1004.json", "invoice_1004_revised.json")
-    first = make_extracted(invoice_number="1004")
-    second = make_extracted(invoice_number="1004", total="5100.00", subtotal="5100.00")
-    factory, _ = build_factory(tmp_path, ScriptedIngestionAgent([first, second]))
+    factory, _ = build_factory(tmp_path, ScriptedIngestionAgent([extracted_1004(), extracted_1004(revised=True)]))
     states = process_dir(d, factory).states
     assert statuses(states) == ["PAID", "REJECTED"]
     assert "invoice_number_reused" in [f.code for f in states[1]["flags"]]
@@ -178,7 +198,7 @@ def test_revised_invoice_rejected(conn, tmp_path):
 
 def test_batch_continues_after_error(conn, tmp_path):
     """An extractor that keeps crashing (all 3 attempts) on one file ends that file as ERROR and the rest of the batch still runs."""
-    d = copy_invoices(tmp_path, "invoice_1001.txt", "invoice_1002.txt", "invoice_1003.txt")
+    d = write_files(tmp_path, {"a.txt": "first", "b.txt": "second", "c.txt": "third"})
     factory, _ = build_factory(tmp_path, ScriptedIngestionAgent(
         [make_extracted(invoice_number="A"), *[RuntimeError("boom")] * 3, make_extracted(invoice_number="C")]))
     # "boom" is not a timeout or connection error, so the end-of-batch retry leaves it alone.
