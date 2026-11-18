@@ -129,7 +129,7 @@ Runtime files live in `var/` (gitignored): inventory and history, paused-run che
 
 ## Human in the loop
 
-**Why.** LangChain's [human-in-the-loop docs](https://docs.langchain.com/oss/python/langchain/human-in-the-loop) describe pausing an agent before an action that is hard to undo or needs sign-off, saving the graph state so it can resume later, even in another process, once a person approves, edits or rejects. Paying a vendor is exactly that kind of action.
+**Why.** Human in the loop is meant for actions that are hard to undo or that need sign-off: the agent pauses before acting, its graph state is saved so it can resume later (even in another process), and a person approves, edits or rejects. Paying a vendor is exactly that kind of action.
 
 **When a person is asked:**
 - The analyst and VP still disagree after 3 rounds.
