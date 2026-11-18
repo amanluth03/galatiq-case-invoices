@@ -15,12 +15,34 @@ Acme loses about **$2M/year** to manual invoice handling: a **30% error rate** a
 
 ## Quick start
 
-Requires Python 3.11+ and an xAI API key.
+Requires Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and an xAI API key.
+
+### See it in the browser (one command)
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate   # or: python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"                               # or: uv pip install -e ".[dev]"
-cp .env.example .env                                  # then put your key in XAI_API_KEY=...
+./start
+```
+
+That's it. The script:
+1. creates a Python environment in `.venv` and installs everything (first run only, about a minute),
+2. asks for your xAI API key if `.env` doesn't have one yet (saved to `.env`, which git ignores),
+3. starts the review screen and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
+
+Once it's open, click **Process all sample invoices** to watch all 20 samples go through live (about 5 minutes, 5 at a time), or drop any file from `data/invoices/` into the upload area to follow a single invoice (about 20 seconds). Then open any invoice in the queue to see the original document, the flags, the analyst and VP's back-and-forth, and the decision.
+
+| Variation | What it does |
+|---|---|
+| `./start --reset` | Same, but wipes previous results first for a clean demo |
+| `PORT=8010 ./start` | Use a different port if 8000 is taken |
+| `NO_BROWSER=1 ./start` | Don't open a browser tab automatically |
+
+### Command line
+
+The `./start` script sets up the environment; after that (or after a manual setup), activate it and use `main.py` directly:
+
+```bash
+source .venv/bin/activate        # manual setup instead of ./start: uv venv && uv pip install -e ".[dev]"
+cp .env.example .env             # only if ./start hasn't created it; put your key in XAI_API_KEY=...
 ```
 
 | Command | What it does |
