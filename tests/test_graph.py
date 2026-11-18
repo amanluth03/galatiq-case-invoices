@@ -289,3 +289,17 @@ def test_reused_thread_after_guardrail_block_uses_new_decision(conn):
     assert first["final"].decided_by == "guardrail"
     assert second["final"].decided_by == "agents" and second["final"].reasoning == "stock short"
     assert len(pay.calls) == 0
+
+
+@pytest.mark.parametrize("field", ["vendor", "total"])
+def test_pay_refuses_missing_vendor_or_total(conn, field):
+    """Even a justified human APPROVE cannot pay an invoice with no vendor or total: ERROR, and pay is never called."""
+    ex = ScriptedExtractor([make_extracted(**{field: ExtractedField(value=None, raw=None, confidence="low")})])
+    a, v = ScriptedAnalyst([make_recommendation()] * 3), ScriptedVP(send_backs())
+    graph, pay = make_graph(conn, ex, a, v)
+    first, config = run(graph, "invoice_1001.txt")
+    assert "__interrupt__" in first
+    out = graph.invoke(Command(resume={"decision": "APPROVE", "note": "", "justification": "I know them"}), config)
+    assert out["final"].status == "ERROR" and out["final"].decided_by == "system"
+    assert out["final"].reasoning == "cannot pay: missing vendor/total"
+    assert len(pay.calls) == 0

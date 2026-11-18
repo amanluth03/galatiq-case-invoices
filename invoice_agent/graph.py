@@ -142,6 +142,9 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
     def pay(state: PipelineState) -> Command[Literal["__end__", "fail"]]:
         """Pay the vendor the invoice total and record who approved it; a payment error ends the run as ERROR."""
         inv = state["invoice"]
+        if not (inv.vendor or "").strip() or inv.total is None:
+            # Last line of defence (e.g. a human approved over missing_vendor): never pay an unknown payee or amount.
+            return Command(goto="fail", update={"error": "cannot pay: missing vendor/total"})
         try:
             result = deps.pay(inv.vendor, inv.total)
         except Exception as exc:
