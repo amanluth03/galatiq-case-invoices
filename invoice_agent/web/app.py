@@ -29,7 +29,7 @@ from invoice_agent.models import FinalOutcome, Flag, PipelineState, Uncertainty
 from invoice_agent.runner import (
     _paid_checkpoint, build_runtime, hydrate, invoice_files, keeps_result, process_file, resume_review, run_batch,
 )
-from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON
+from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON
 from invoice_agent.utils.reader import SUPPORTED_SUFFIXES
 from invoice_agent.web.highlight import highlight
 from invoice_agent.web.security import ALLOWED_HOSTS, is_same_origin, needs_origin_check
@@ -246,9 +246,9 @@ def verdict(state: PipelineState) -> str:
     final, flags, approval = state["final"], state.get("flags", []), state.get("approval")
     blocked = blocking_summary(flags)
     if final.status == "NEEDS_HUMAN_REVIEW":
-        # The guardrail's hold overwrites approval.reasoning; recognise it to explain why a person is needed.
-        if final.reasoning == HUMAN_CONFIRMATION_REASON:
-            return "Agents approved, but prices, totals or currency differ from our records: please confirm"
+        # The money-difference hold overwrites approval.reasoning with a fixed sentence; show it as is.
+        if final.reasoning.startswith(HUMAN_REVIEW_REASON.split("{")[0]):
+            return final.reasoning
         rounds = len(approval.rounds) if approval else 0
         return f"Agents couldn't agree after {rounds} round{'s' if rounds != 1 else ''}: your call"
     if final.status == "REJECTED":

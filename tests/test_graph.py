@@ -353,13 +353,45 @@ def test_agent_approval_over_price_mismatch_goes_to_human(conn):
     assert "price_mismatch" in {f.code for f in out["flags"]}
     assert "__interrupt__" in out and out.get("final") is None
     assert out["approval"].decision == "NEEDS_HUMAN_REVIEW"
-    assert out["approval"].reasoning.startswith("Agents approved, but the invoice's prices, totals or currency differ")
+    assert out["approval"].reasoning == (
+        "Prices, totals or currency differ from Acme's records. The agents recommended APPROVE; a person decides.")
     assert len(pay.calls) == 0
     # The human's APPROVE is final: it pays, exactly once.
     done = graph.invoke(Command(resume={"decision": "APPROVE", "note": "rate agreed", "justification": None}), config)
     assert done["final"].status == "PAID" and done["final"].decided_by == "human"
     assert pay.calls == [("Widgets Inc.", Decimal("5100.00"))]
     assert len(a.calls) == 1 and len(v.calls) == 1
+
+
+def test_agent_reject_over_price_mismatch_goes_to_human(conn):
+    """Agents REJECT an off-price invoice with no hard-rule flag: a person decides, nothing is paid."""
+    ex = ScriptedIngestionAgent([extracted_price_mismatch()])
+    a = ScriptedAnalyst([make_recommendation("REJECT")])
+    v = ScriptedVP([make_review(final_decision="REJECT", reasoning="price unexplained")])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, config = run(graph, "invoice_1001.txt")
+    assert "__interrupt__" in out and out.get("final") is None
+    assert out["approval"].decision == "NEEDS_HUMAN_REVIEW"
+    assert out["approval"].reasoning == (
+        "Prices, totals or currency differ from Acme's records. The agents recommended REJECT; a person decides.")
+    assert len(pay.calls) == 0
+
+
+def test_agent_reject_with_must_reject_and_price_mismatch_stays_rejected(conn):
+    """A hard-rule flag plus a price difference is still rejected by the agents' REJECT, with no person step."""
+    # 1002 again, but GadgetX billed at $800 instead of the $750 reference: exceeds_stock plus price_mismatch.
+    ex = ScriptedIngestionAgent([make_extracted(
+        invoice_number="1002", vendor="Gadgets Co.", date="2026-01-30", due_date="2026-01-30",
+        subtotal=None, tax=None, total="16000.00", payment_terms="Net 30",
+        items=[ExtractedLineItem(name=_f("GadgetX"), qty=_f("20"), unit_price=_f("800"))])])
+    a = ScriptedAnalyst([make_recommendation("REJECT")])
+    v = ScriptedVP([make_review(final_decision="REJECT", reasoning="not enough stock")])
+    graph, pay = make_graph(conn, ex, a, v)
+    out, _ = run(graph, "invoice_1002.txt")
+    codes = {f.code for f in out["flags"]}
+    assert {"exceeds_stock", "price_mismatch"} <= codes
+    assert out["final"].status == "REJECTED" and "__interrupt__" not in out
+    assert len(pay.calls) == 0
 
 
 def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path):

@@ -1,6 +1,6 @@
-"""Tests for the guardrail rules: must_reject blocks an agent APPROVE; price/total/currency deviations need a human to confirm."""
+"""Tests for the guardrail rules: must_reject blocks an agent APPROVE; money-only differences go to a person whatever the agents decided."""
 from invoice_agent.models import Flag
-from invoice_agent.utils.guardrail import HUMAN_CONFIRMATION_REASON, apply_guardrail, needs_human_confirmation
+from invoice_agent.utils.guardrail import HUMAN_REVIEW_REASON, apply_guardrail, needs_person
 
 
 def flag(severity, message, code="c"):
@@ -21,18 +21,26 @@ def test_must_reject_forces_rejection_with_messages():
     assert out.reasoning == "Blocked by guardrail: A short; B gone"
 
 
-def test_price_or_arithmetic_mismatch_needs_human_confirmation():
-    """A price, arithmetic, unprinted-amount or non-USD flag means an agent APPROVE must be confirmed by a person."""
+def test_money_differences_need_a_person_for_either_recommendation():
+    """A price, arithmetic, unprinted-amount or non-USD flag sends an agent APPROVE or REJECT to a person."""
     for code in ("price_mismatch", "arithmetic_mismatch", "amount_not_in_source", "non_usd_currency"):
-        assert needs_human_confirmation([flag("needs_scrutiny", "x", code)]) == HUMAN_CONFIRMATION_REASON
-    assert HUMAN_CONFIRMATION_REASON == (
-        "Agents approved, but the invoice's prices, totals or currency differ from Acme's records: a person must confirm"
+        for rec in ("APPROVE", "REJECT"):
+            reason = needs_person([flag("needs_scrutiny", "x", code)], rec)
+            assert reason == HUMAN_REVIEW_REASON.format(recommendation=rec)
+    assert needs_person([flag("needs_scrutiny", "x", "price_mismatch")], "REJECT") == (
+        "Prices, totals or currency differ from Acme's records. The agents recommended REJECT; a person decides."
     )
 
 
-def test_other_flags_do_not_need_human_confirmation():
-    """over_10k, other scrutiny flags and info flags let an agent APPROVE through to payment."""
+def test_must_reject_never_goes_to_a_person_for_money_differences():
+    """A must_reject flag alongside a price flag means no person step: the invoice is rejected."""
+    flags = [flag("needs_scrutiny", "p", "price_mismatch"), flag("must_reject", "stock", "exceeds_stock")]
+    assert needs_person(flags, "REJECT") is None
+
+
+def test_other_flags_do_not_need_a_person():
+    """over_10k, other scrutiny flags and info flags let the agents' decision stand."""
     flags = [flag("needs_scrutiny", "big", "over_10k"), flag("needs_scrutiny", "d", "due_date_missing"),
              flag("info", "urgent", "urgency_language")]
-    assert needs_human_confirmation(flags) is None
-    assert needs_human_confirmation([]) is None
+    assert needs_person(flags, "APPROVE") is None
+    assert needs_person([], "REJECT") is None

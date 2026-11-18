@@ -2,15 +2,15 @@
 
 ## What it does
 
-The system takes an invoice in whatever shape it arrives (PDF, text, JSON, CSV, XML; typos, odd labels, missing fields), reads it with an AI agent, checks it against Acme's inventory and price list, has two AI agents (an analyst and a VP) argue the approve/reject decision, and then either pays it through the mock payment API or logs the rejection with written reasoning. Hard rules (stock, unknown items, bad data, double-billing) are enforced by code, not by the AI, so no argument from an agent or text on an invoice can get a bad invoice paid. Every outcome records who decided (agents, guardrail, human or system) and why. When the agents can't settle a case, or approve an invoice whose prices differ from Acme's records, it waits for a person on a review screen built for a PE analyst or VP.
+The system takes an invoice in whatever shape it arrives (PDF, text, JSON, CSV, XML; typos, odd labels, missing fields), reads it with an AI agent, checks it against Acme's inventory and price list, has two AI agents (an analyst and a VP) argue the approve/reject decision, and then either pays it through the mock payment API or logs the rejection with written reasoning. Hard rules (stock, unknown items, bad data, double-billing) are enforced by code, not by the AI, so no argument from an agent or text on an invoice can get a bad invoice paid. Every outcome records who decided (agents, guardrail, human or system) and why. When the agents can't settle a case, or an invoice's prices, totals or currency differ from Acme's records, it waits for a person on a review screen built for a PE analyst or VP.
 
 ### Business impact
 
 Acme loses about **$2M/year** to manual invoice handling: a **30% error rate** and **5-day delays**.
 
-- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **every one was settled with written reasons in about 5 minutes; none had to wait for a person** (6 paid, 11 rejected, 3 duplicates).
-- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time: **9 of the 20 samples are blocked this way**, **2 more are rejected by the agents** for an unexplained price or currency deviation, and **3 are recognized as the same invoice sent twice**, so they are never paid twice.
-- **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an approved invoice's prices or totals differ from Acme's reference (a rush fee, a discount, a foreign currency). The reviewer sees the original document with the uncertain spots highlighted, the agents' argument, and a plain verdict, not logs.
+- **Delay, 5 days → minutes.** Extraction, inventory check, approval reasoning and payment run in one pass, around a minute per invoice. On the 20 sample files, **18 were settled with written reasons in about 5 minutes and 2 were held for a person** (6 paid, 9 rejected by rules, 2 to a person, 3 duplicates).
+- **Errors are caught by rules, not by attention.** Over-stock orders, unknown or zero-stock items, negative quantities, missing vendors, overbilled totals and reused invoice numbers are rejected by code every time: **9 of the 20 samples are blocked this way**, **2 more go to a person** because their prices or currency differ from Acme's records, and **3 are recognized as the same invoice sent twice**, so they are never paid twice.
+- **Humans stay where judgment and money meet.** A person decides when the two agents disagree after three rounds, and whenever an invoice's prices, totals or currency differ from Acme's reference (a rush fee, a discount, a foreign currency), whatever the agents decided. The reviewer sees the original document with the uncertain spots highlighted, the agents' argument, and a plain verdict, not logs.
 - **Every decision is auditable.** Reasoning, flags, the full analyst ⇄ VP exchange and the deciding party are stored per invoice.
 
 ## Quick start
@@ -26,13 +26,13 @@ Requires Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and an xAI API key.
 That's it. The script:
 1. creates a Python environment in `.venv` and installs everything (first run only, about a minute),
 2. asks for your xAI API key if `.env` doesn't have one yet (saved to `.env`, which git ignores),
-3. starts the review screen and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
+3. starts the review screen with an empty queue (it wipes earlier results every time; inventory is re-seeded) and opens **http://127.0.0.1:8000** in your browser. Press **Ctrl+C** to stop it.
 
 Once it's open, click **Process all sample invoices** to watch all 20 samples go through live (about 5 minutes, 5 at a time), or drop any file from `data/invoices/` into the upload area to follow a single invoice (about 20 seconds). Then open any invoice in the queue to see the original document, the flags, the analyst and VP's back-and-forth, and the decision.
 
 | Variation | What it does |
 |---|---|
-| `./start --reset` | Same, but wipes previous results first for a clean demo |
+| `./start --keep` | Keep the previous history instead of starting empty |
 | `PORT=8010 ./start` | Use a different port if 8000 is taken |
 | `NO_BROWSER=1 ./start` | Don't open a browser tab automatically |
 
@@ -87,12 +87,12 @@ flowchart TD
     class human person
 ```
 
-**What the guardrail does.** It is a few lines of plain code that sit between the agents and the money, so no AI answer on its own can get a bad invoice paid. When the agents approve, it checks three things in order:
-1. **Any hard-rule flag** (for example an item not in inventory, or more than is in stock) turns the approval into **Rejected**.
-2. **Any price, total or currency that differs from Acme's records**, or an amount that isn't printed on the invoice, sends it to **Needs a person** instead of paying.
-3. **Only an approval with neither problem is Paid.**
+**What the guardrail does.** It is a few lines of plain code that sit between the agents and the money, so no AI answer on its own can get a bad invoice paid. Its rules, in order:
+1. **Any hard-rule flag** (for example an item not in inventory, or more than is in stock) turns an approval into **Rejected**.
+2. **Only money differences** (a price, total or currency that differs from Acme's records, or an amount that isn't printed on the invoice) send the invoice to **Needs a person**, whether the agents approved or rejected it.
+3. **Otherwise an approval is Paid.**
 
-Agent rejections go straight to **Rejected**, and if the analyst and VP still disagree after 3 rounds, the invoice goes to **Needs a person**.
+Other agent rejections go straight to **Rejected**, and if the analyst and VP still disagree after 3 rounds, the invoice goes to **Needs a person**.
 
 ### How an invoice moves through the app
 
@@ -100,7 +100,7 @@ Agent rejections go straight to **Rejected**, and if the analyst and VP still di
 2. **Ingest.** The ingestion agent turns the messy text into a structured invoice. Code then cleans the values: dates become real dates, money becomes exact decimals, "Widget A" becomes the inventory item WidgetA.
 3. **Validate.** The rulebook (below) checks the invoice against Acme's inventory, price list and invoice history and produces flags. If this exact invoice was already processed, it stops here as a duplicate.
 4. **Analyst and VP.** The analyst investigates with its tools and recommends APPROVE or REJECT with evidence. The VP reviews that reasoning and either accepts it or sends it back with specific feedback. They get up to 3 rounds to agree.
-5. **Guardrail.** If the agents approve, code double-checks: any hard-rule flag forces a rejection, and any price, total or currency difference goes to a person instead of being paid.
+5. **Guardrail.** If the agents approve, code double-checks: any hard-rule flag forces a rejection, and an invoice with only price, total or currency differences goes to a person, whether the agents approved or rejected it.
 6. **Decide.** The invoice is paid through the mock payment API, rejected with written reasons, or held for a person on the review screen. Every outcome records who decided (agents, guardrail, human or system) and why.
 
 ### The agents
@@ -156,14 +156,14 @@ Validation produces flags in three severities. The agents see all of them; code 
 | Severity | What it means | Checks |
 |---|---|---|
 | **must_reject** | Never paid on the agents' say-so. If the agents approve anyway, the guardrail forces REJECT. Only a human can override, with a written justification. | quantity exceeds stock (summed across repeated lines of the same item) · item not in inventory · zero-stock / suspicious item · quantity ≤ 0 · negative total · missing vendor or total · missing quantity · no line items · stated total higher than line items + tax + shipping · line total higher than qty × price · invoice number already used with different contents (possible double-billing) |
-| **needs_scrutiny** | The analyst must explain each one in writing; unexplained means REJECT. A price, total or currency deviation (or an amount not printed on the invoice) also sends an agent APPROVE to a person before payment. | unit price ≠ Acme reference price (any amount, no tolerance) · totals don't reconcile · total over $10K (triggers a 5-point checklist the VP cannot skip) · due date missing or on/before invoice date · non-USD currency · missing unit price · an extracted amount that isn't printed anywhere on the invoice · extraction uncertainty |
+| **needs_scrutiny** | The analyst must explain each one in writing; unexplained means REJECT. A price, total or currency deviation (or an amount not printed on the invoice), with no must_reject flag, sends the invoice to a person whether the agents said APPROVE or REJECT. | unit price ≠ Acme reference price (any amount, no tolerance) · totals don't reconcile · total over $10K (triggers a 5-point checklist the VP cannot skip) · due date missing or on/before invoice date · non-USD currency · missing unit price · an extracted amount that isn't printed anywhere on the invoice · extraction uncertainty |
 | **info** | Context for the agents; decides nothing on its own. | urgency / wire-transfer pressure language · "formerly" vendor rename |
 
 Reference stock and prices (seed data, extended with a `unit_price` column): WidgetA 15 @ $250, WidgetB 10 @ $500, GadgetX 5 @ $750, FakeItem 0.
 
 ## Results on the sample invoices
 
-Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-17): **6 PAID, 9 blocked by hard rules, 2 rejected by the agents on judgment, 3 DUPLICATE, 0 waiting for a person, 0 ERROR.**
+Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices` (grok-4-1-fast-non-reasoning, 2026-11-17): **6 PAID, 9 rejected by rules, 2 waiting for a person, 3 DUPLICATE, 0 ERROR.**
 
 | File | Vendor | Amount | Outcome | Why |
 |---|---|---|---|---|
@@ -177,22 +177,35 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 | invoice_1007.csv | MegaWidgets Corp | $15,525.00 | REJECTED | WidgetA and WidgetB exceed stock (rule); printed total kept as printed, its under-billing flagged |
 | invoice_1008.txt | NoProd Industries | $9,900.00 | REJECTED | SuperGizmo / MegaSprocket not in inventory (rule, enforced by the guardrail) |
 | invoice_1009.json | (missing) | −$250.00 | REJECTED | Missing vendor, negative quantity and total (rule) |
-| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | REJECTED | WidgetA at $300 vs $250 reference, unexplained rush fee (agents) |
+| invoice_1010.txt | Consolidated Materials Group | $7,185.00 | NEEDS_HUMAN_REVIEW | WidgetA at $300 vs $250 reference, rush fee: a person decides |
 | invoice_1011.pdf | Summit Manufacturing Co. | $3,000.00 | PAID | Clean |
 | invoice_1011.txt | Summit Manufacturing Co. | $3,000.00 | DUPLICATE | Same invoice as the PDF |
 | invoice_1012.pdf | QuickShip Distributers | $9,975.00 | PAID | Clean (vendor-rename note is information only) |
 | invoice_1012.txt | QuickShip Distributers | $9,975.00 | DUPLICATE | Same invoice as the PDF |
 | invoice_1013.json | Atlas Industrial Supply | $22,562.80 | REJECTED | 22 WidgetA, 18 WidgetB, 9 GadgetX exceed stock, and the total is $50 more than its lines + tax (rule) |
 | invoice_1013.pdf | Atlas Industrial Supply | $22,562.80 | DUPLICATE | Same invoice as the JSON |
-| invoice_1014.xml | TechParts International | $4,125.00 | REJECTED | EUR invoice at non-reference prices; can't be verified against USD reference (agents) |
+| invoice_1014.xml | TechParts International | $4,125.00 | NEEDS_HUMAN_REVIEW | EUR invoice at non-reference prices; can't be verified against USD reference: a person decides |
 | invoice_1015.csv | Reliable Components Inc. | $6,500.00 | PAID | Clean |
 | invoice_1016.json | Widgets Inc. | $3,233.00 | REJECTED | WidgetC not in inventory (rule) |
 
-**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **about 5 minutes with 5 workers** on this run, with no Grok timeouts. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't. In this run the agents rejected both price/currency deviations outright, so nothing waited for a person; had they approved either one, the guardrail would have sent it to the review screen instead of paying.
+**Wall clock for the 20 files:** about 18 minutes one at a time (Task 12 run, including a 10-minute Grok slowdown; ~7 minutes at the normal ~20 s per invoice) vs **about 5 minutes with 5 workers** on this run, with no Grok timeouts. Which copy of a duplicate pair is the original can differ between runs, and agent judgment (PAID vs needs review vs rejected on a price deviation) can vary too; the rule-based outcomes don't. Invoices 1010 and 1014 are held for a person whatever the agents recommend.
+
+## Human in the loop
+
+**What brings in a person:**
+- The analyst and VP can't agree within 3 rounds.
+- An invoice's price, total or currency differs from Acme's records (and no hard rule is broken), whether the agents recommended APPROVE or REJECT.
+- An amount isn't printed anywhere on the invoice.
+
+**What the reviewer sees and does.** The original document with the uncertain spots highlighted, the flags, and the agents' argument (with their recommendation). They approve or reject, with a note. Approving over a hard rule needs a written justification. The human decision is final.
+
+**How it works.** The graph pauses at a LangGraph `interrupt` and its state is saved in a SQLite checkpointer; the run resumes from the review screen when the reviewer answers. The CLI never blocks: a paused invoice ends the run as `NEEDS_HUMAN_REVIEW`.
+
+**Try it.** Run `./start`, then drop `data/invoices/invoice_1010.txt` (a rush fee changes the price) or `data/invoices/invoice_1014.xml` (billed in EUR) into the upload area. Watch it stop at the person step, then approve or reject it.
 
 ## Safety and design decisions
 
-- **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total/currency deviation, or a human approves on the review screen.
+- **Payment has exactly two doors:** both agents approve *and* there is no must_reject flag *and* no price/total/currency deviation (those go to a person), or a human approves on the review screen.
 - **Never pay twice:** the same invoice in two formats is caught by a content fingerprint and marked DUPLICATE; a reused number with different contents is rejected; re-running a file that was already paid or is awaiting review returns the stored result; a crash after payment is recovered from the checkpoint instead of paying again.
 - **Prompt-injection defenses:** vendor text is fenced as untrusted data in the agents' briefing, the policy lives in the system prompt, and every rule that matters is a code gate the agents cannot argue past.
 - **Fail closed:** missing quantities, prices, vendors or totals, totals too large to verify, and unreadable files all end in REJECT, review or ERROR, never in payment. If the analyst/VP call fails (e.g. a Grok timeout) on an invoice that already broke a hard rule, it is still REJECTED by the guardrail, with a note that the agents' write-up is missing.
@@ -217,11 +230,11 @@ The offline suite covers reading, normalization, every rulebook check, the guard
 - **Local prototype:** single machine, SQLite, no cloud deployment; payment is the README's mock function.
 - **One processor per file at a time:** don't run CLI batches while the server is processing the same files.
 - **No reviewer login:** the review screen is localhost-only and has no authentication or per-user roles; anyone at the machine can approve.
-- **Currency:** EUR (and any non-USD) amounts are not converted; they are flagged and compared as-is, so such invoices go to a person.
+- **Currency:** foreign currency is flagged, not converted, and a person decides.
 - **Prices are ground truth:** any deviation from Acme's reference price is scrutinized, even a legitimate discount. The cost is an extra human click on those invoices.
 - **PDFs need a text layer:** scanned image PDFs are reported, not OCR'd.
 - **Model choice:** `grok-4-1-fast-non-reasoning` at temperature 0. `grok-3` timed out and returned HTTP 500s on the analyst's tool-calling loop in testing; this model ran the whole pipeline reliably and quickly. Override with `XAI_MODEL`.
-- **LLM judgment varies:** a clean invoice may be PAID on one run and sent to review on another; the hard outcomes (rejections, duplicates, no auto-pay on price deviations) are enforced by code and do not vary.
+- **LLM judgment varies:** a clean invoice may be PAID on one run and sent to review on another; the hard outcomes (rejections, duplicates, no auto-pay or auto-reject on price deviations) are enforced by code and do not vary.
 
 ---
 

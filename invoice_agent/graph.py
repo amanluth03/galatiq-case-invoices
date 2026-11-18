@@ -21,7 +21,7 @@ from invoice_agent.agents.approval.policy import APPROVAL_POLICY
 from invoice_agent.agents.ingestion.agent import IngestionAgent, run_extraction
 from invoice_agent.infra.db import all_skus
 from invoice_agent.models import FinalOutcome, HumanDecision, JustifiedHumanDecision, PipelineState
-from invoice_agent.utils.guardrail import apply_guardrail, needs_human_confirmation
+from invoice_agent.utils.guardrail import apply_guardrail, needs_person
 from invoice_agent.utils.reader import read_file
 from invoice_agent.utils.validation.validate import claim_identity, fingerprint, run_validation
 
@@ -120,6 +120,7 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
 
     def approval(state: PipelineState) -> Command[Literal["guardrail", "log_rejection", "human_review", "fail"]]:
         """Run the analyst <-> VP loop; APPROVE must still pass the guardrail, REJECT is logged, unsettled goes to a human.
+        An invoice with only money differences goes to a person whether the agents said APPROVE or REJECT.
         If the agents fail, a must_reject flag still rejects the invoice; otherwise the run ends as ERROR."""
         ctx = ApprovalContext(
             invoice=state["invoice"], flags=state.get("flags", []),
@@ -136,21 +137,21 @@ def build_graph(deps: Deps, checkpointer) -> CompiledStateGraph:
             # E.g. Grok timeout or malformed agent output on a clean invoice: no decision means ERROR, not a crash.
             return Command(goto="fail", update={"error": _error_text(exc)})
         outcome = out["outcome"]
+        reason = needs_person(state.get("flags", []), outcome.decision)
+        if reason is not None and outcome.decision in ("APPROVE", "REJECT"):
+            # The rounds keep the agents' own reasoning; the outcome now says why a person must look.
+            held = outcome.model_copy(update={"decision": "NEEDS_HUMAN_REVIEW", "reasoning": reason})
+            return Command(goto="human_review", update={"approval": held})
         goto = {"APPROVE": "guardrail", "REJECT": "log_rejection", "NEEDS_HUMAN_REVIEW": "human_review"}[outcome.decision]
         return Command(goto=goto, update={"approval": outcome})
 
-    def guardrail(state: PipelineState) -> Command[Literal["pay", "log_rejection", "human_review"]]:
-        """Block an agent APPROVE over any must_reject flag; send price/total deviations to a human; otherwise pay."""
+    def guardrail(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:
+        """Block an agent APPROVE over any must_reject flag; otherwise pay (money differences were already sent to a person)."""
         flags = state.get("flags", [])
         forced = apply_guardrail(flags)
         if forced is not None:
-            # must_reject wins over everything, including a needed human confirmation.
+            # must_reject wins over everything.
             return Command(goto="log_rejection", update={"guardrail_outcome": forced})
-        reason = needs_human_confirmation(flags)
-        if reason is not None:
-            # The rounds keep the agents' own reasoning; the outcome now says why a person must look.
-            held = state["approval"].model_copy(update={"decision": "NEEDS_HUMAN_REVIEW", "reasoning": reason})
-            return Command(goto="human_review", update={"approval": held})
         return Command(goto="pay")
 
     def human_review(state: PipelineState) -> Command[Literal["pay", "log_rejection"]]:

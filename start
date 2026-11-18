@@ -2,7 +2,7 @@
 # One-command launcher for the review screen.
 # Sets up the Python environment on first run, makes sure an xAI key is configured,
 # then starts the web UI at http://127.0.0.1:8000 and opens it in your browser.
-# Extra flags are passed through to main.py, e.g. `./start --reset` for a clean slate.
+# Begins with an empty screen every time (it runs main.py with --reset); `./start --keep` keeps the previous history instead.
 set -euo pipefail
 
 cd "$(dirname "$0")"          # always run from the repo root, wherever it was called from
@@ -76,5 +76,12 @@ fi
   done
 ) &
 
+# --reset is the default so every demo starts empty; --keep is ours (not main.py's) and skips the reset.
+RESET="--reset"
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--keep" ]; then RESET=""; else ARGS+=("$arg"); fi
+done
+
 say "Starting the review screen at $URL (press Ctrl+C to stop) ..."
-exec .venv/bin/python main.py --serve --port "$PORT" "$@"
+exec .venv/bin/python main.py --serve --port "$PORT" $RESET ${ARGS[@]+"${ARGS[@]}"}

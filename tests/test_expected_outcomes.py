@@ -36,13 +36,13 @@ REUSED_NUMBER_PAIRS = [("invoice_1004.json", "invoice_1004_revised.json")]
 # original is REJECTED for ordering too many WidgetA.
 BULK_1013 = ("invoice_1013.json", "invoice_1013.pdf")
 
-# Prices differ from Acme's reference (1010 rush $300, 1014 EUR): agents alone may never pay these.
-NOT_AUTO_PAID = {"invoice_1010.txt", "invoice_1014.xml"}
+# Prices differ from Acme's reference (1010 rush $300, 1014 EUR): whatever the agents decide, a person decides.
+NEEDS_PERSON = {"invoice_1010.txt", "invoice_1014.xml"}
 
 # Clean-by-rulebook invoices: no blocking flag; PAID or NEEDS_HUMAN_REVIEW are both acceptable judgments.
 CLEAN = {"invoice_1001.txt", "invoice_1006.csv", "invoice_1015.csv"}
 
-ALL_FILES = (set(MUST_REJECT) | NOT_AUTO_PAID | CLEAN
+ALL_FILES = (set(MUST_REJECT) | NEEDS_PERSON | CLEAN
              | {name for pair in [*SAME_CONTENT_PAIRS, *REUSED_NUMBER_PAIRS, BULK_1013] for name in pair})
 
 
@@ -118,10 +118,10 @@ def test_reused_number_is_rejected_once(outcomes, pair):
 
 
 @pytest.mark.live
-@pytest.mark.parametrize("name", sorted(NOT_AUTO_PAID))
-def test_price_deviation_is_not_auto_paid(outcomes, name):
-    """An invoice whose prices differ from Acme's reference is rejected or held for a human, never paid by agents."""
-    assert outcomes[name]["final"].status in {"REJECTED", "NEEDS_HUMAN_REVIEW"}, outcomes[name]["final"].reasoning
+@pytest.mark.parametrize("name", sorted(NEEDS_PERSON))
+def test_price_or_currency_difference_goes_to_a_person(outcomes, name):
+    """An invoice with only price or currency differences is held for a person, whatever the agents decided."""
+    assert outcomes[name]["final"].status == "NEEDS_HUMAN_REVIEW", outcomes[name]["final"].reasoning
 
 
 @pytest.mark.live
