@@ -62,7 +62,7 @@ def find_duplicate(conn: sqlite3.Connection, inv: Invoice, fp: str, content_hash
     # 1004 vs 1004_revised: same number, different contents.
     flag = Flag(
         severity="must_reject", code="invoice_number_reused", field_path="invoice_number",
-        message=f"Invoice number {inv.invoice_number} was already processed with different contents — possible double-billing",
+        message=f"Invoice number {inv.invoice_number} was already processed with different contents: possible double-billing",
     )
     return DuplicateCheck(duplicate_of=None, flags=[flag])
 

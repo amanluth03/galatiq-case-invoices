@@ -8,7 +8,7 @@ from invoice_agent.models import Flag, FinalOutcome
 # amount_not_in_source: the reader's amount isn't printed on the invoice; non_usd_currency: prices can't be compared.
 _HUMAN_CONFIRMATION_CODES = {"price_mismatch", "arithmetic_mismatch", "amount_not_in_source", "non_usd_currency"}
 HUMAN_CONFIRMATION_REASON = (
-    "Agents approved, but the invoice's prices, totals or currency differ from Acme's records — a person must confirm"
+    "Agents approved, but the invoice's prices, totals or currency differ from Acme's records: a person must confirm"
 )
 
 

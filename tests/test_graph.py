@@ -367,7 +367,7 @@ def test_agent_approval_with_only_over_10k_and_info_flags_is_paid(conn, tmp_path
     # The urgency flag comes from the raw text, so the file says it; the scripted extraction supplies the fields.
     source = tmp_path / "urgent.txt"
     # Amounts are printed too, so the amount-in-source check sees every extracted figure in the file.
-    source.write_text("Widgets Inc. invoice — URGENT, please pay immediately\n"
+    source.write_text("Widgets Inc. invoice: URGENT, please pay immediately\n"
                       "WidgetA 15 $250.00 $3,750.00\nWidgetB 10 $500.00 $5,000.00\nGadgetX 5 $750.00 $3,750.00\n"
                       "Subtotal $12,500.00\nTotal $12,500.00")
     ex = ScriptedIngestionAgent([make_extracted(

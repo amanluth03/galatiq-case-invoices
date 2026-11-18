@@ -8,7 +8,7 @@ from invoice_agent.infra.config import Settings
 
 def test_missing_key_raises_clear_error():
     """Without XAI_API_KEY, make_model fails with a message telling the user what to do."""
-    with pytest.raises(MissingApiKey, match="XAI_API_KEY is not set — add it to .env"):
+    with pytest.raises(MissingApiKey, match="XAI_API_KEY is not set: add it to .env"):
         make_model(Settings(xai_api_key=None))
 
 

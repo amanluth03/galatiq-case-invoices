@@ -10,7 +10,7 @@ For every field return:
 - value: the field as you best read it. You may correct obvious OCR-style typos (2O26 -> 2026, $3,500.O0 -> 3500.00).
 
 Copy every money amount and quantity (unit price, line total, subtotal, tax, shipping, total) exactly as printed,
-even if the arithmetic is wrong — arithmetic is checked later by code. Typo correction applies only to non-digit
+even if the arithmetic is wrong: arithmetic is checked later by code. Typo correction applies only to non-digit
 look-alike characters (O->0, l->1), never to changing digits. If an amount is not printed, return null for it
 rather than computing it.
 - raw: the exact snippet of source text the value came from.

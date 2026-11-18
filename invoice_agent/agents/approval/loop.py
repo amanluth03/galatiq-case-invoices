@@ -65,7 +65,7 @@ def make_vp_node(vp: VPFn):
             if _is_over_threshold(ctx) and not checklist_complete(last.recommendation):
                 # Policy: over $10K the VP cannot accept an incomplete checklist, even if it wants to.
                 missing = ", ".join(missing_checklist_keys(last.recommendation))
-                notes.append(f"Over $10K: checklist incomplete — missing: {missing}")
+                notes.append(f"Over $10K: checklist incomplete: missing: {missing}")
             if notes:
                 # Report every problem in one round so none costs an extra round.
                 feedback = review.feedback

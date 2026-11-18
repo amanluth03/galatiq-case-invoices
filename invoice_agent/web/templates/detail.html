@@ -34,7 +34,7 @@
   <p class="verdict-note"><span class="label-inline">Reviewer note:</span> {{ inv.human_note }}</p>
   {% endif %}
   <p class="verdict-meta">
-    {% if inv.awaiting %}Waiting on your decision — nothing has been paid.
+    {% if inv.awaiting %}Waiting on your decision: nothing has been paid.
     {% else %}Decided by {{ inv.decided_by }}.{% if inv.paid %} Payment sent.{% endif %}{% endif %}
     {% if inv.duplicate_of %}<a href="/invoices/{{ inv.duplicate_of }}">Open the original invoice</a>{% endif %}
   </p>
@@ -50,7 +50,7 @@
     <div class="warn">
       <p class="warn-title">Blocked: {{ inv.blocking_summary }}</p>
       <ul>
-        {% for b in inv.blocking %}<li><strong>{{ b.title }}</strong> — {{ b.message }}</li>{% endfor %}
+        {% for b in inv.blocking %}<li><strong>{{ b.title }}</strong>: {{ b.message }}</li>{% endfor %}
       </ul>
       <p>Approving overrides these checks, so you'll need to say why.</p>
     </div>
@@ -105,7 +105,7 @@
       {% elif inv.status == "ERROR" %}
         <p class="muted">No checks ran because the file couldn't be processed.</p>
       {% else %}
-        <p class="ok">No issues — every check passed.</p>
+        <p class="ok">No issues: every check passed.</p>
       {% endif %}
     </section>
 
@@ -200,7 +200,7 @@
       {% if r.review %}
       <div class="turn turn-vp">
         <p class="who">VP
-          {% if r.review.accepted %}<span class="tag tag-{{ (r.review.final_decision or '') | lower }}">agreed — {{ "approve" if r.review.final_decision == "APPROVE" else "reject" }}</span>
+          {% if r.review.accepted %}<span class="tag tag-{{ (r.review.final_decision or '') | lower }}">agreed: {{ "approve" if r.review.final_decision == "APPROVE" else "reject" }}</span>
           {% else %}<span class="tag tag-back">sent it back</span>{% endif %}
         </p>
         <p class="said">{{ r.review.reasoning }}</p>

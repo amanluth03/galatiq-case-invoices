@@ -79,7 +79,7 @@ def make_ingestion_agent(model) -> IngestionAgent:
         """Send the prompt and raw text (plus a correction request on retries) and return the parsed extraction."""
         messages = [("system", INGESTION_PROMPT), ("user", raw_text)]
         if errors:
-            # Self-correction for unusable answers only (schema errors, no line items) — never for arithmetic.
+            # Self-correction for unusable answers only (schema errors, no line items): never for arithmetic.
             listed = "\n".join(f"- {e}" for e in errors)
             messages.append(("user", "Your previous attempt had these problems. Re-read the text and fix them, "
                              f"copying every amount exactly as printed:\n{listed}"))

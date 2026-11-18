@@ -26,7 +26,7 @@ def test_price_or_arithmetic_mismatch_needs_human_confirmation():
     for code in ("price_mismatch", "arithmetic_mismatch", "amount_not_in_source", "non_usd_currency"):
         assert needs_human_confirmation([flag("needs_scrutiny", "x", code)]) == HUMAN_CONFIRMATION_REASON
     assert HUMAN_CONFIRMATION_REASON == (
-        "Agents approved, but the invoice's prices, totals or currency differ from Acme's records — a person must confirm"
+        "Agents approved, but the invoice's prices, totals or currency differ from Acme's records: a person must confirm"
     )
 
 

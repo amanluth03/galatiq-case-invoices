@@ -10,7 +10,7 @@ import pdfplumber
 from pydantic import BaseModel
 
 # Scanned PDFs have no text layer; OCR is out of scope, so we report an issue instead of guessing.
-NO_TEXT_ISSUE = "no text layer — scanned PDF not supported"
+NO_TEXT_ISSUE = "no text layer: scanned PDF not supported"
 # Public so the runner can pick the files a directory scan should process.
 SUPPORTED_SUFFIXES = {".pdf", ".txt", ".json", ".csv", ".xml"}
 

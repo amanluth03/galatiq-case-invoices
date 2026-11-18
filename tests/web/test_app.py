@@ -63,7 +63,7 @@ def test_detail_shows_plain_verdict_and_no_raw_json(conn):
     state = process_file(INVOICES / "invoice_1001.txt", deps, graph)
     resp = client.get(f"/invoices/{state['run_id']}")
     assert resp.status_code == 200
-    assert "Agents couldn&#39;t agree after 3 rounds — your call" in resp.text
+    assert "Agents couldn&#39;t agree after 3 rounds: your call" in resp.text
     assert "Widgets Inc." in resp.text and "$5,000.00" in resp.text
     assert '{"' not in resp.text and '{&#34;' not in resp.text
     # Decision panel is shown only for runs awaiting review.

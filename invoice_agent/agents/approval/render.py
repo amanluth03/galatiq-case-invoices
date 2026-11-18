@@ -72,7 +72,7 @@ def render_context(ctx: ApprovalContext, rounds: list[Round], recommendation: Re
              for f in ctx.flags] or ["- none"]
     data += ["", "## Where the extraction was uncertain"]
     data += [f"- {u.field_path} ({u.confidence} confidence): {u.reason}"
-             + (f" — source text {u.raw!r}, read as {u.normalized!r}" if u.raw or u.normalized else "")
+             + (f", source text {u.raw!r}, read as {u.normalized!r}" if u.raw or u.normalized else "")
              for u in ctx.uncertainties] or ["- none"]
     parts = _fence("invoice_data", data)
     # Only rounds the VP has already reviewed are history; the VP's current draft is shown separately below.

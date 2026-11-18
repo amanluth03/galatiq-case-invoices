@@ -46,7 +46,7 @@ def test_pdf_without_text_layer_reports_issue(monkeypatch):
     # Simulate a scanned PDF by making text extraction return nothing.
     monkeypatch.setattr(pdfplumber.page.Page, "extract_text", lambda self, **kw: None)
     result = read_file(INVOICES / "invoice_1012.pdf")
-    assert result.issues == ["no text layer — scanned PDF not supported"]
+    assert result.issues == ["no text layer: scanned PDF not supported"]
 
 
 def test_unsupported_extension_raises(tmp_path):

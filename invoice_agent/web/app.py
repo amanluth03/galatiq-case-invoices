@@ -46,7 +46,7 @@ MULTIPART_OVERHEAD_BYTES = 64 * 1024
 MAX_STEM_CHARS = 100
 ALLOWED_TYPES_TEXT = "PDF, TXT, JSON, CSV or XML"
 TOO_LARGE_MESSAGE = "Invoices can be up to 5 MB. This one is larger, so it wasn't processed."
-INTERRUPTED_REASON = "Processing was interrupted — re-upload the file to try again."
+INTERRUPTED_REASON = "Processing was interrupted: re-upload the file to try again."
 
 STATUS_LABELS = {
     "PAID": "Paid", "REJECTED": "Rejected", "NEEDS_HUMAN_REVIEW": "Needs your review",
@@ -68,7 +68,7 @@ DECIDED_BY_LABELS = {
 SEVERITY_GROUPS = [
     ("must_reject", "Blocking", "Any one of these stops payment."),
     ("needs_scrutiny", "Needs a look", "Allowed only with a clear explanation."),
-    ("info", "FYI", "Context — not decisive on its own."),
+    ("info", "FYI", "Context: not decisive on its own."),
 ]
 CONFIDENCE_LABELS = {"high": "Confident", "medium": "Somewhat sure", "low": "Unsure"}
 CHECKLIST_LABELS = {
@@ -85,7 +85,7 @@ FLAG_TITLES = {
     "total_exceeds_line_items": "Total is more than the lines add up to",
     "line_total_exceeds_price": "Line total is more than qty × price", "total_unverifiable": "Total can't be verified",
     "invoice_number_reused": "Invoice number already billed", "price_mismatch": "Price differs from our records",
-    "arithmetic_mismatch": "Numbers don't reconcile", "over_10k": "Over $10,000 — extra checks required",
+    "arithmetic_mismatch": "Numbers don't reconcile", "over_10k": "Over $10,000: extra checks required",
     "due_date_missing": "Due date missing", "due_before_or_on_invoice_date": "Due on or before the invoice date",
     "non_usd_currency": "Not in US dollars", "missing_unit_price": "Unit price missing",
     "amount_not_in_source": "Amount not found on the invoice",
@@ -125,7 +125,7 @@ _FIELDS = [
 def money(value, currency: str = "USD") -> str:
     """Format an amount as $1,234.56 (or "1,234.56 EUR" for other currencies); a dash when unknown."""
     if value is None or value == "":
-        return "—"
+        return "n/a"
     try:
         d = Decimal(str(value))
     except InvalidOperation:
@@ -138,20 +138,20 @@ def money(value, currency: str = "USD") -> str:
 def quantity(value) -> str:
     """Format a quantity without trailing zeros (10, not 10.00)."""
     if value is None:
-        return "—"
+        return "n/a"
     return f"{Decimal(value).normalize():,f}"
 
 
 def nice_date(value) -> str:
     """Format a date as 15 Jan 2026; a dash when unknown."""
     # value.day instead of %-d: the no-padding flag is not portable (it fails on Windows).
-    return f"{value.day} {value.strftime('%b %Y')}" if isinstance(value, date) else "—"
+    return f"{value.day} {value.strftime('%b %Y')}" if isinstance(value, date) else "n/a"
 
 
 def nice_time(iso: str | None) -> str:
     """Format a stored ISO timestamp as "17 Nov, 14:32 UTC" for the queue (times are stored in UTC)."""
     if not iso:
-        return "—"
+        return "n/a"
     t = datetime.fromisoformat(iso)
     return f"{t.day} {t.strftime('%b, %H:%M')} UTC"
 
@@ -248,21 +248,21 @@ def verdict(state: PipelineState) -> str:
     if final.status == "NEEDS_HUMAN_REVIEW":
         # The guardrail's hold overwrites approval.reasoning; recognise it to explain why a person is needed.
         if final.reasoning == HUMAN_CONFIRMATION_REASON:
-            return "Agents approved, but prices, totals or currency differ from our records — please confirm"
+            return "Agents approved, but prices, totals or currency differ from our records: please confirm"
         rounds = len(approval.rounds) if approval else 0
-        return f"Agents couldn't agree after {rounds} round{'s' if rounds != 1 else ''} — your call"
+        return f"Agents couldn't agree after {rounds} round{'s' if rounds != 1 else ''}: your call"
     if final.status == "REJECTED":
         if final.decided_by == "human":
             return "Rejected by a reviewer"
         return f"Rejected: {blocked}" if blocked else "Rejected by the agents"
     if final.status == "PAID":
         inv = state.get("invoice")
-        who = "after a reviewer approved it" if final.decided_by == "human" else "— approved by the agents"
+        who = "after a reviewer approved it" if final.decided_by == "human" else ", approved by the agents"
         to = f" to {inv.vendor}" if inv and inv.vendor else ""
         amount = money(inv.total, inv.currency) if inv else ""
         return f"Paid {amount}{to} {who}"
     if final.status == "DUPLICATE":
-        return "Duplicate — this invoice was already processed, so it wasn't paid again"
+        return "Duplicate: this invoice was already processed, so it wasn't paid again"
     return "We couldn't process this file"
 
 
@@ -276,7 +276,7 @@ def why_line(state: PipelineState) -> str:
         if blocked:
             return f"Blocked: {blocked}"
     if final.status == "DUPLICATE":
-        return "Already processed — not paid twice"
+        return "Already processed: not paid twice"
     if final.status == "ERROR":
         # No raw text means the read step itself failed; otherwise a later stage (extraction, agents) did.
         prefix = "Processing failed: " if state.get("raw_text") else "Couldn't read this file: "
@@ -321,7 +321,7 @@ def queue_view(rows: list[dict]) -> dict:
         items.append({
             "run_id": row["run_id"], "status": status, "status_label": STATUS_LABELS.get(status, status),
             "number": row["invoice_number"] or display_name(row) or row["run_id"],
-            "vendor": row["vendor"] or "—", "amount": money(row["amount"], currency),
+            "vendor": row["vendor"] or "n/a", "amount": money(row["amount"], currency),
             # A run in progress may still carry its previous result's state, so its "why" is the live stage.
             "why": stage_label(row.get("stage")) if processing else why_line(state) if state.get("final") else "",
             "updated": nice_time(row["updated_at"]), "processing": processing,
@@ -368,7 +368,7 @@ def detail_view(row: dict) -> dict:
         value = getattr(inv, key, None) if inv else None
         if key in ("shipping", "notes") and value is None and key not in by_path:
             continue  # optional fields most invoices don't have: hide rather than show a row of dashes
-        shown = money(value, currency) if kind == "money" else nice_date(value) if kind == "date" else (value or "—")
+        shown = money(value, currency) if kind == "money" else nice_date(value) if kind == "date" else (value or "n/a")
         fields.append({"label": label, "value": shown, "money": kind == "money", "unc": unc_view(key)})
 
     lines = []
@@ -413,7 +413,7 @@ def detail_view(row: dict) -> dict:
         "vendor": (inv.vendor if inv else None) or "Unknown vendor",
         "amount": money(inv.total if inv else None, currency), "approve_amount": money(inv.total, currency) if inv else "",
         "file_name": file_name,
-        "invoice_date": nice_date(inv.date) if inv else "—", "due_date": nice_date(inv.due_date) if inv else "—",
+        "invoice_date": nice_date(inv.date) if inv else "n/a", "due_date": nice_date(inv.due_date) if inv else "n/a",
         "verdict": verdict(state), "reasoning": final.reasoning, "decided_by": DECIDED_BY_LABELS[final.decided_by],
         "human_note": final.human_note, "paid": bool(final.payment_result), "duplicate_of": state.get("duplicate_of"),
         "fields": fields, "lines": lines, "flag_groups": groups, "blocking": blocking,
@@ -450,7 +450,7 @@ def _run_job(job: tuple[str, Path, str], deps: Deps, graph) -> PipelineState:
         if state["run_id"] != run_id:
             # Two uploads of the same file raced; the other run holds the result.
             return _save_error(deps.conn, run_id, str(path), "This file matches another invoice that was "
-                               "being processed at the same time — open that one from the queue.", digest)
+                               "being processed at the same time: open that one from the queue.", digest)
         return state
     except Exception as exc:
         # process_file never raises for a bad file, so this is a database problem; carry on with the batch.
@@ -581,9 +581,9 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
         if decided:
             notice = "Your decision has been recorded."
         elif seen and row["status"] == "PROCESSING":
-            notice = "This file is already being processed — here is its progress."
+            notice = "This file is already being processed: here is its progress."
         elif seen:
-            notice = "This file was uploaded before, so here is that invoice — it wasn't processed or paid again."
+            notice = "This file was uploaded before, so here is that invoice: it wasn't processed or paid again."
         return render_detail(request, row, notice=notice)
 
     @app.get("/invoices/{run_id}/status")
@@ -660,11 +660,11 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
             if row["status"] != "NEEDS_HUMAN_REVIEW":
                 label = STATUS_LABELS.get(row["status"], row["status"]).lower()
                 return render_detail(request, row, 409,
-                                     notice=f"This invoice isn't waiting for a decision — it's already {label}.")
+                                     notice=f"This invoice isn't waiting for a decision: it's already {label}.")
             if decision not in ("APPROVE", "REJECT"):
                 return render_detail(request, row, 400, error="Choose Approve or Reject.", form=form)
             has_blocking = any(f.get("severity") == "must_reject" for f in row["state"].get("flags", []))
-            message = ("A justification is required to approve over blocking issues — "
+            message = ("A justification is required to approve over blocking issues: "
                        "write why paying is right despite them. It goes on the audit record.")
             if decision == "APPROVE" and has_blocking and not justification.strip():
                 return render_detail(request, row, 400, error=message, form=form)
@@ -687,7 +687,7 @@ def create_app(deps: Deps, graph, conn, settings: Settings | None = None,
                 # E.g. a missing or corrupt checkpoint: log the detail, show the reviewer a plain notice.
                 log.exception("decision failed", extra={"fields": {"run_id": run_id}})
                 return render_detail(request, db.get_run(conn, run_id) or row, 500, form=form, notice=(
-                    "We couldn't record that decision — the run's saved progress is missing or damaged. "
+                    "We couldn't record that decision: the run's saved progress is missing or damaged. "
                     "Check the queue before trying again."))
         return RedirectResponse(f"/invoices/{run_id}?decided=1", status_code=303)
 

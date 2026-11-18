@@ -11,7 +11,7 @@ class MissingApiKey(RuntimeError):
 def make_model(settings: Settings) -> ChatXAI:
     """Return a ChatXAI for the configured model, or raise MissingApiKey if there is no key."""
     if not settings.xai_api_key:
-        raise MissingApiKey("XAI_API_KEY is not set — add it to .env")
+        raise MissingApiKey("XAI_API_KEY is not set: add it to .env")
     # temperature 0: invoice decisions should be as repeatable as the model allows.
     # timeout/max_retries: a stuck API call must fail (-> ERROR run) instead of hanging the pipeline.
     return ChatXAI(model=settings.xai_model, api_key=settings.xai_api_key, temperature=0,

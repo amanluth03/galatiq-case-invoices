@@ -32,7 +32,7 @@
   </ol>
   <p class="progress-now" aria-live="polite" data-live-label>Now: {{ run.label }}</p>
   <noscript><p class="hint">This page refreshes every few seconds until the invoice is done.</p></noscript>
-  <p class="hint">The full result opens here automatically when processing finishes — usually under a minute.</p>
+  <p class="hint">The full result opens here automatically when processing finishes: usually under a minute.</p>
 </section>
 {% endblock %}
 {% block scripts %}<script src="{{ url_for('static', path='live.js') }}" defer></script>{% endblock %}

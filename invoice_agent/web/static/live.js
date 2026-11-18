@@ -58,7 +58,7 @@
         })
         .catch(function () {
           // Stop polling: the server is down or the run is gone. Say so instead of spinning forever.
-          if (label) label.textContent = "Lost touch with the server — refresh the page to check progress.";
+          if (label) label.textContent = "Lost touch with the server: refresh the page to check progress.";
         });
     }
     setTimeout(tick, POLL_MS);

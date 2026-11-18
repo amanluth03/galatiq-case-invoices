@@ -186,7 +186,7 @@ def test_startup_marks_interrupted_runs_error(conn, tmp_path):
     make_client(conn, tmp_path)
     row = db.get_run(conn, "r1")
     assert row["status"] == "ERROR"
-    assert row["state"]["final"]["reasoning"] == "Processing was interrupted — re-upload the file to try again."
+    assert row["state"]["final"]["reasoning"] == "Processing was interrupted: re-upload the file to try again."
 
 
 def test_init_db_adds_stage_column_to_old_database(tmp_path):
