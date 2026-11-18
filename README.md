@@ -203,7 +203,7 @@ Live run of `BATCH_WORKERS=5 python main.py --reset --invoice_dir=data/invoices`
 
 ## Human in the loop
 
-**Why a person belongs in an agent system.** LangChain's [human-in-the-loop docs](https://docs.langchain.com/oss/python/langchain/human-in-the-loop) describe the idea as pausing an agent before an action runs so a person can review it. It is meant for actions that are hard to undo or that need sign-off, and it lets you add human oversight to what an agent proposes. The graph state is saved through LangGraph's persistence layer, so execution can pause safely and resume later, even in another process. The reviewer can then approve, edit, or reject with feedback.
+**Why a person belongs in an agent system.** Human in the loops in agent systems are meant for actions that are hard to undo or that need sign-off, and it lets you add human oversight to what an agent proposes. The graph state is saved through LangGraph's persistence layer, so execution can pause safely and resume later, even in another process. The reviewer can then approve, edit, or reject with feedback.
 
 Paying a vendor is exactly that kind of action: hard to undo, and it needs sign-off. So the agents prepare the case, code blocks what is clearly wrong, and a person signs off where judgment and money meet: when the agents still disagree after 3 rounds, or when prices, totals or currency differ from Acme's records.
 
